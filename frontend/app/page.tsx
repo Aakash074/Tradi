@@ -9,6 +9,11 @@ import RegimeBanner from "@/components/dashboard/RegimeBanner";
 import ActivityFeed from "@/components/dashboard/ActivityFeed";
 import AgentControls from "@/components/dashboard/AgentControls";
 import EquityCurve from "@/components/charts/EquityCurve";
+import GhostVsRealChart from "@/components/dashboard/GhostVsRealChart";
+import KellyGauge from "@/components/dashboard/KellyGauge";
+import RegimeRadar from "@/components/dashboard/RegimeRadar";
+import MicrostructureHeatmap from "@/components/dashboard/MicrostructureHeatmap";
+import CorrelationMatrix from "@/components/dashboard/CorrelationMatrix";
 import {
   fetchDashboard,
   startAgent,
@@ -22,6 +27,8 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [equityHistory, setEquityHistory] = useState<Array<{ time: string; value: number }>>([]);
+
+  const regimeMode = data?.regime_mode ?? data?.confluence?.regime_mode ?? "NORMAL";
 
   const load = useCallback(async () => {
     try {
@@ -62,13 +69,15 @@ export default function DashboardPage() {
   const rejections =
     data?.activity_log.filter((l) => !l.eligible && l.action === "REJECTED").length ?? 0;
 
+  const ghost = data?.ghost ?? data?.confluence?.ghost;
+
   return (
     <div className="p-6 md:p-8">
       <header className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="text-sm text-zinc-500">
-            Autonomous multi-strategy agent · BNB Hackathon Track 1
+            Three-Layer Confluence · BNB Hackathon Track 1
           </p>
         </div>
         <AgentControls
@@ -88,8 +97,8 @@ export default function DashboardPage() {
 
       <div className="mb-6">
         <RegimeBanner
-          regime={data?.regime ?? "ACCUMULATION"}
-          activeStrategy={data?.active_strategy ?? "DCA Strategy"}
+          regime={regimeMode}
+          activeStrategy="Three-Layer Confluence"
           regimeDisplay={data?.regime_display}
         />
       </div>
@@ -99,6 +108,8 @@ export default function DashboardPage() {
           totalReturn={data?.portfolio.total_return_pct ?? 0}
           totalValue={data?.portfolio.total_value_usd ?? 10000}
           dailyPnl={data?.portfolio.daily_pnl_pct ?? 0}
+          unrealizedPnl={data?.portfolio.unrealized_pnl_pct ?? 0}
+          cashUsd={data?.portfolio.cash_usd}
         />
         <RiskMonitor
           drawdown={data?.portfolio.drawdown_pct ?? 0}
@@ -106,10 +117,7 @@ export default function DashboardPage() {
           activeBreakers={data?.risk.active_breakers ?? []}
           isDisqualified={data?.risk.is_disqualified ?? false}
         />
-        <RegimeBadge
-          regime={data?.regime ?? "ACCUMULATION"}
-          activeStrategy={data?.active_strategy}
-        />
+        <RegimeBadge regime={regimeMode} activeStrategy="Confluence Engine" />
         <div className="card p-6">
           <p className="text-sm text-zinc-500">Today&apos;s Trades</p>
           <p className="mt-2 text-3xl font-bold">{data?.portfolio.trades_today ?? 0}</p>
@@ -128,6 +136,21 @@ export default function DashboardPage() {
         />
       </div>
 
+      <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <GhostVsRealChart ghost={ghost} />
+        <KellyGauge
+          optimalPct={data?.kelly_gauge?.optimal_pct ?? 0}
+          regimeMode={regimeMode}
+          multiplier={data?.confluence?.russian_doll?.position_size_multiplier}
+        />
+        <RegimeRadar mode={regimeMode} metrics={data?.confluence?.regime_metrics} />
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <MicrostructureHeatmap data={data?.microstructure_heatmap} />
+        <CorrelationMatrix matrix={data?.correlation_matrix} />
+      </div>
+
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <ActivityFeed logs={data?.activity_log ?? []} />
         <div className="card p-6">
@@ -142,6 +165,14 @@ export default function DashboardPage() {
               </dd>
             </div>
             <div className="flex justify-between">
+              <dt className="text-zinc-500">Russian Doll</dt>
+              <dd className="text-xs text-zinc-300">
+                {data?.confluence?.russian_doll?.trading_halted
+                  ? "HALTED"
+                  : `${((data?.confluence?.russian_doll?.position_size_multiplier ?? 1) * 100).toFixed(0)}% size`}
+              </dd>
+            </div>
+            <div className="flex justify-between">
               <dt className="text-zinc-500">TWAK Registered</dt>
               <dd className={data?.twak_registered ? "text-green-400" : "text-zinc-500"}>
                 {data?.twak_registered ? "Yes" : "No"}
@@ -150,10 +181,6 @@ export default function DashboardPage() {
             <div className="flex justify-between">
               <dt className="text-zinc-500">Agent ID (ERC-8004)</dt>
               <dd className="font-mono text-xs text-zinc-300">{data?.agent_id ?? "—"}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-zinc-500">x402 Payments</dt>
-              <dd>{data?.x402_stats.payments_count ?? 0}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-zinc-500">Open Positions</dt>

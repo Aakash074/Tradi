@@ -6,9 +6,17 @@ interface PnLCardProps {
   totalReturn: number;
   totalValue: number;
   dailyPnl: number;
+  unrealizedPnl?: number;
+  cashUsd?: number;
 }
 
-export default function PnLCard({ totalReturn, totalValue, dailyPnl }: PnLCardProps) {
+export default function PnLCard({
+  totalReturn,
+  totalValue,
+  dailyPnl,
+  unrealizedPnl = 0,
+  cashUsd,
+}: PnLCardProps) {
   const isPositive = totalReturn >= 0;
   const dailyPositive = dailyPnl >= 0;
 
@@ -30,6 +38,9 @@ export default function PnLCard({ totalReturn, totalValue, dailyPnl }: PnLCardPr
         <div>
           <p className="text-zinc-500">Portfolio Value</p>
           <p className="font-medium">${totalValue.toLocaleString()}</p>
+          {cashUsd !== undefined && (
+            <p className="text-xs text-zinc-600">Cash ${cashUsd.toLocaleString()}</p>
+          )}
         </div>
         <div className="text-right">
           <p className="text-zinc-500">Daily PnL</p>
@@ -37,6 +48,12 @@ export default function PnLCard({ totalReturn, totalValue, dailyPnl }: PnLCardPr
             {dailyPositive ? "+" : ""}
             {dailyPnl.toFixed(2)}%
           </p>
+          {unrealizedPnl !== 0 && (
+            <p className={`text-xs ${unrealizedPnl >= 0 ? "text-green-400/80" : "text-red-400/80"}`}>
+              Unrealized {unrealizedPnl >= 0 ? "+" : ""}
+              {unrealizedPnl.toFixed(2)}%
+            </p>
+          )}
         </div>
       </div>
     </div>

@@ -1,41 +1,159 @@
-# Tradi Strategies
+# Tradi Strategies — V3 Momentum Pullback Confluence
 
-## 1. Market State Adapter (60%)
+Single-strategy agent with layered entry filters. Legacy three-strategy blend (Market State / Whale Shadow / Momentum Breakout) is **not** used in the main path.
 
-Detects market regime hourly using ADX and ATR:
+## Backtest (2024-01-01 → 2026-01-01)
 
-| Regime | Condition | Strategy |
-|--------|-----------|----------|
-| TRENDING | ADX > 25, ATR > 1.5× avg | Momentum |
-| RANGING | ADX < 20 | Mean reversion |
-| VOLATILE | ATR > 2× avg | Breakout |
-| ACCUMULATION | Default | DCA |
+| Metric | Result | Target |
+|--------|--------|--------|
+| Total return | +26.44% | — |
+| Sharpe | 1.83 | > 1.8 ✓ |
+| Max drawdown | 6.75% | < 15% ✓ |
+| Win rate | 45.5% | > 48% |
+| Profit factor | 1.16 | > 1.6 |
+| Expectancy / trade | 0.203% | > 0.15% ✓ |
+| Trades | 2,840 | — |
 
-## 2. Smart Money Shadow (disabled)
+Config: `1.5:4.5` exits, ADX ≥ 25, dynamic sizing, 149 eligible tokens.
 
-**Status:** Disabled in orchestrator until BSC on-chain whale indexer is integrated.
+```bash
+python scripts/backtest.py --strategy momentum_pullback_v3 \
+  --asymmetric_exits 1.5:4.5 --adx_filter 25 --sizing dynamic \
+  --start 2024-01-01 --end 2026-01-01
+python scripts/plot_backtest.py --also-backend
+```
 
-Paper mode previously used simulated random signals (`WhaleShadow.SIMULATED = True`), which produced fake copy-trade signals. Re-enable by setting `WHALE_SHADOW_ENABLED = True` in `orchestrator.py` after wiring real wallet monitoring.
+Chart: `results/tradi_backtest_v3.png`
 
-## 3. Momentum Breakout (15%)
+---
 
-Directional momentum on eligible tokens only:
-- Entry: Price breaks above 20-period high with volume > 1.5× average
-- Exit: Trailing stop at 2× ATR or 48h max hold
-- Position: 15% of portfolio (dynamic risk budget)
-- Stop: 3% hard stop
+## Layer 1: Regime Filter (`strategies/regime_filter.py`)
 
-## Strategy Selection
+| Mode | Condition | Action |
+|------|-----------|--------|
+| DEFENSIVE | Vol ratio > 1.5 or Fear & Greed < 20 | Hold cash — no new entries |
+| NORMAL | Default | Trade normally |
+| AGGRESSIVE | Low vol + greed | Trade normally (larger dynamic sizes) |
 
-Every 15 minutes:
-1. Run all strategies
-2. Reject ineligible tokens (score = 0)
-3. Apply priority boosts (market state in TRENDING/VOLATILE, whale confidence > 85%)
-4. Execute highest `opportunity_score` if above threshold
-5. Keepalive trade at 20:00 UTC if no trades today
+---
 
-## Risk Features
+## Layer 2: Core Signal (`strategies/microstructure.py`)
 
-- **Dynamic Risk Budgeting** — Position sizes scale with drawdown and confidence
-- **Profit Protection Scaling** — Trim winners at +10%, +20%, +35% gains
-- **Reentry Throttle** — 4-hour cooldown before re-entering a token after exit
+**Momentum pullback V3** — buy pullbacks in uptrends:
+
+1. **Trend** — Price > EMA20 and ADX > threshold (20 production / 25 backtest)
+2. **Pullback** — RSI between 30 and 50
+3. **Volume** — Current bar > 1.2× 20-bar average
+4. **Chop filter** — Reject if ADX < 20
+
+Signal strength ≥ 0.6 required. Up to **4 signals per cycle**.
+
+---
+
+## Layer 3: Confluence Entry Paths (`agent/confluence_engine.py`)
+
+Evaluated in order; first match wins, then pre-trade checklist:
+
+| Path | Condition | Strategy tag |
+|------|-----------|----------------|
+| **Liquidity sweep** | EMA20 stop-hunt + volume spike + recovery (quality > 0.7) | `LIQUIDITY_SWEEP` |
+| **FVG + momentum** | Near unmitigated Fair Value Gap + momentum_ok | `FVG_MOMENTUM` |
+| **Standard** | momentum_ok + historical context confidence ≥ 0.6 | `STANDARD` |
+
+Supporting modules:
+
+- `agent/historical_context.py` — 5h trend/volume/volatility (can be disabled for testing)
+- `agent/liquidity_sweep.py` — Stop-hunt detection below EMA20
+- `agent/fvg_detector.py` — Bullish/bearish FVG zones
+- `agent/pre_trade_checklist.py` — Spread, R:R ≥ 2:1, volume, technical stop
+- `agent/correlation_guard.py` — Blocks correlated new positions
+
+---
+
+## Token Universe (`agent/token_selector.py`)
+
+When `universe: top_20_momentum` in config:
+
+- Ranks eligible tokens by 24h momentum
+- Refreshes every 15 minutes (900s cache)
+- Production config uses top-50 scan for broader coverage during testing
+
+---
+
+## Position Sizing (`strategies/kelly_sizing.py`)
+
+**Dynamic** (production) or **aggressive** (tournament):
+
+| Mode | Behavior |
+|------|----------|
+| `dynamic` | Vol-adjusted, ~4% base, max 5%, scaled by regime and drawdown |
+| `aggressive` | 4% base, max 5%, tournament week |
+
+Russian Doll multiplier reduces size at 8% / 12% drawdown tiers.
+
+---
+
+## Exits (`agent/exit_manager.py` + `agent/orchestrator.py`)
+
+| Config | Stop | Target | R:R |
+|--------|------|--------|-----|
+| **Production** (`production.yaml`) | 1.5% | 4.5% | 1:3 |
+| **Tournament** (`tournament_week.yaml`) | 1.5% | 6.0% | 1:4 |
+
+- Trailing stop activates at **+3%**, trails **1%** below high
+- ATR can tighten stop (never widen beyond configured %)
+- 48-hour max hold in orchestrator
+
+### On-chain execution (competition / live)
+
+Every exit is a **real TWAK swap** so wallet PnL matches hackathon scoring:
+
+| Event | TWAK swap | Log tag |
+|-------|-----------|---------|
+| **Entry** | `USDT → token` | `TRADE_EXECUTED` |
+| **Full exit** (stop / target / time) | `token → USDT` | `EXIT_EXECUTED` |
+| **Profit-protection trim** | partial `token → USDT` | `PROFIT_PROTECTION` |
+
+Flow each cycle:
+
+1. Update prices → check stop / target / trailing / 48h max hold
+2. On trigger, sell full position via `execute_with_slippage_protection(token, USDT, market_value_usd)`
+3. Record `exit_tx_hash`, update portfolio cash, log to BNB SDK
+4. If swap fails → position stays open with `exit_pending`; **retries next cycle**
+
+**Paper mode** uses the same code path with simulated TWAK swaps (fake tx hashes).  
+**Competition mode** submits real BSC transactions — both legs count toward live PnL.
+
+Slippage protection matches entries: dynamic slippage from 24h vol, reject if price impact > 2%.
+
+---
+
+## Risk (`agent/russian_doll_risk.py`)
+
+| Drawdown | Action |
+|----------|--------|
+| 8% | 50% size, max 3 positions |
+| 12% | 25% size, max 2 positions |
+| 20% (tournament) / 25% (production) | Trading halted |
+
+Daily loss limit: **5%** (config). Competition DQ at **30%** drawdown.
+
+---
+
+## Daily Trade Enforcer (`agent/trade_enforcer.py`)
+
+After **20:00 UTC**, if `trades_today == 0`:
+
+1. Force strongest signal from scan, or
+2. Qualification trade on lowest-ATR eligible token at **0.5%**
+
+---
+
+## Config Files
+
+| File | Use |
+|------|-----|
+| `config/production.yaml` | Paper / production: 1.5:4.5, ADX 20, dynamic sizing, 25% halt |
+| `config/tournament_week.yaml` | Competition: 1.5:6.0, ADX 20, aggressive sizing, 20% halt |
+
+Loaded via `backend/tournament_config.py` → `TournamentConfig`.

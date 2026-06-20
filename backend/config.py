@@ -20,17 +20,22 @@ class Settings(BaseSettings):
 
     # Data providers
     cmc_api_key: str = ""
-    bnb_sdk_api_key: str = ""
+    cmc_mcp_api_key: str = ""
+
+    # x402 micropayments (CMC premium MCP endpoints — USDC on Base via TWAK)
+    x402_enabled: bool = False
+    x402_max_payment_usdc: float = 0.01
 
     # Agent
     agent_mode: Literal["competition", "paper", "live"] = "paper"
+    competition_dry_run: bool = False
     competition_start: str = "2026-06-22T00:00:00Z"
     competition_end: str = "2026-06-28T23:59:59Z"
 
     # Risk
     max_drawdown_halt: float = 0.25
     max_drawdown_dq: float = 0.30
-    daily_loss_halt: float = 0.10
+    daily_loss_halt: float = 0.05
     max_position_pct: float = 0.25
     max_trades_per_day: int = 5
     max_concurrent_positions: int = 3
@@ -46,6 +51,12 @@ class Settings(BaseSettings):
     # Optional
     arkham_api_key: str = ""
     nansen_api_key: str = ""
+
+    # Advisory gate (veto-only external review, fail-open)
+    advisory_gate_enabled: bool = False
+    advisory_gate_api_key: str = ""
+    openai_api_key: str = ""
+    advisory_gate_model: str = "gpt-3.5-turbo"
 
 
 @lru_cache

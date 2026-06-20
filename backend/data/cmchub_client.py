@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -10,6 +11,8 @@ import httpx
 
 from config import get_settings
 from data.cache import DataCache
+from data.cmc_mcp_client import CMCMCPClient
+from data.twak_wrapper import TWAKWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +22,16 @@ class CMCHubClient:
 
     BASE_URL = "https://pro-api.coinmarketcap.com/v1"
 
-    def __init__(self, cache: Optional[DataCache] = None):
+    def __init__(self, cache: Optional[DataCache] = None, live_cmc: bool = False):
         self.settings = get_settings()
+        self.live_cmc = live_cmc or os.environ.get("LIVE_CMC", "").lower() in ("1", "true", "yes")
         self.cache = cache or DataCache()
+        self.twak = TWAKWrapper()
+        self.mcp = CMCMCPClient(
+            cache=self.cache,
+            live_cmc=self.live_cmc,
+            twak_x402_fn=self.twak.x402_fetch_url,
+        )
         self.x402_payments_count = 0
         self.x402_total_cost_usd = 0.0
 
@@ -31,7 +41,9 @@ class CMCHubClient:
         if cached:
             return cached
 
-        if self.settings.agent_mode == "paper" or not self.settings.cmc_api_key:
+        if (self.settings.agent_mode == "paper" and not self.live_cmc) or not self.settings.cmc_api_key:
+            if self.live_cmc and not self.settings.cmc_api_key:
+                logger.warning("live-cmc requested but CMC_API_KEY missing — using mock data")
             return self._mock_response(endpoint, params)
 
         async with httpx.AsyncClient(timeout=30) as client:
@@ -46,12 +58,22 @@ class CMCHubClient:
             return data
 
     async def x402_request(self, endpoint: str, max_payment: float = 0.01) -> dict:
-        """Simulate x402 micropayment for premium data."""
-        self.x402_payments_count += 1
-        cost = min(max_payment, 0.005 + random.random() * 0.005)
-        self.x402_total_cost_usd += cost
-        logger.info("x402 payment: $%.4f for %s", cost, endpoint)
-        return await self._request(endpoint.replace("x402/", ""), {})
+        """Pay for premium CMC x402 endpoint via TWAK wallet."""
+        from data.x402_payment import X402Payment
+
+        payer = X402Payment(
+            max_amount_usdc=max_payment,
+            enabled=True,
+            paper_mode=self.settings.agent_mode == "paper" and not self.settings.competition_dry_run,
+            twak_request=self.twak.x402_fetch_url,
+        )
+        data = await payer.pay_for_data(endpoint, max_amount_usdc=max_payment)
+        if data:
+            stats = payer.get_stats()
+            self.x402_payments_count += stats["payments_count"]
+            self.x402_total_cost_usd += stats["total_cost_usd"]
+            return data
+        return {}
 
     def _mock_response(self, endpoint: str, params: dict) -> dict:
         symbol = params.get("symbol", "CAKE")
@@ -117,15 +139,101 @@ class CMCHubClient:
         return {"open": open_, "high": high, "low": low, "close": close, "volume": volume}
 
     async def get_fear_greed_index(self) -> dict:
-        cached = self.cache.get("sentiment:fear_greed")
+        return await self.mcp.get_fear_and_greed()
+
+    async def get_funding_rate_8h(self, symbol: str) -> float:
+        data = await self.mcp.get_funding_rates(symbol)
+        return float(data.get("funding_rate", 0.0))
+
+    async def get_technical_analysis(self, symbol: str, interval: str = "1h") -> dict:
+        return await self.mcp.get_technical_analysis(symbol, interval=interval)
+
+    async def get_24h_volatility(self, symbol: str = "CAKE") -> float:
+        ohlcv = await self.get_ohlcv(symbol, limit=24)
+        close = ohlcv["close"]
+        if len(close) < 2:
+            return 0.02
+        returns = [(close[i] - close[i - 1]) / close[i - 1] for i in range(1, len(close))]
+        import statistics
+        return statistics.stdev(returns) if len(returns) > 1 else 0.02
+
+    async def get_30d_volatility(self, symbol: str = "CAKE") -> float:
+        ohlcv = await self.get_ohlcv(symbol, limit=100)
+        close = ohlcv["close"]
+        if len(close) < 2:
+            return 0.02
+        returns = [(close[i] - close[i - 1]) / close[i - 1] for i in range(1, len(close))]
+        import statistics
+        return statistics.stdev(returns) if len(returns) > 1 else 0.02
+
+    async def get_exchange_flows_24h(self, symbol: str) -> tuple[float, float]:
+        cache_key = f"flows:{symbol}"
+        cached = self.cache.get(cache_key)
         if cached:
-            return cached
-        result = {"value": random.randint(25, 75), "classification": "Neutral"}
-        self.cache.set("sentiment:fear_greed", result)
+            return cached["inflow"], cached["outflow"]
+        inflow = random.uniform(1_000_000, 10_000_000)
+        outflow = random.uniform(1_000_000, 10_000_000)
+        self.cache.set(cache_key, {"inflow": inflow, "outflow": outflow}, ttl_seconds=900)
+        return inflow, outflow
+
+    async def get_order_book(self, symbol: str, depth: int = 10) -> tuple[list[dict], list[dict]]:
+        cache_key = f"book:{symbol}:{depth}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached["bids"], cached["asks"]
+        price = await self.get_price(symbol)
+        bids = [{"price": price * (1 - 0.001 * i), "size": random.uniform(1000, 50000)} for i in range(depth)]
+        asks = [{"price": price * (1 + 0.001 * i), "size": random.uniform(1000, 50000)} for i in range(depth)]
+        # Slight random imbalance
+        if random.random() > 0.5:
+            for b in bids:
+                b["size"] *= 1.3
+        self.cache.set(cache_key, {"bids": bids, "asks": asks}, ttl_seconds=30)
+        return bids, asks
+
+    async def get_microstructure_heatmap(self, tokens: list[str]) -> list[dict]:
+        """Momentum + mock funding/flow data for dashboard heatmap."""
+        result = []
+        for token in tokens[:30]:
+            funding = await self.get_funding_rate_8h(token)
+            inflow, outflow = await self.get_exchange_flows_24h(token)
+            ratio = outflow / (inflow + 1e-9)
+            if funding < -0.01:
+                fund_sig = "BULLISH_EDGE"
+            elif funding > 0.015:
+                fund_sig = "BEARISH_EDGE"
+            else:
+                fund_sig = "NEUTRAL"
+            if ratio > 2.0:
+                flow_sig = "ACCUMULATION"
+            elif ratio < 0.5:
+                flow_sig = "DISTRIBUTION"
+            else:
+                flow_sig = "NEUTRAL"
+            ohlcv = await self.get_ohlcv(token, limit=20)
+            close = ohlcv.get("close", [])
+            book_imb = 0.0
+            if len(close) >= 2:
+                book_imb = (close[-1] - close[-2]) / close[-2]
+            result.append({
+                "token": token,
+                "funding_rate": round(funding, 6),
+                "funding_signal": fund_sig,
+                "inflow_usd": round(inflow, 0),
+                "outflow_usd": round(outflow, 0),
+                "flow_signal": flow_sig,
+                "book_imbalance": round(book_imb, 3),
+            })
         return result
 
     def get_x402_stats(self) -> dict:
+        mcp_stats = self.mcp.get_x402_stats()
         return {
-            "payments_count": self.x402_payments_count,
-            "total_cost_usd": round(self.x402_total_cost_usd, 4),
+            "payments_count": self.x402_payments_count + mcp_stats.get("payments_count", 0),
+            "total_cost_usd": round(
+                self.x402_total_cost_usd + mcp_stats.get("total_cost_usd", 0), 4
+            ),
+            "enabled": mcp_stats.get("enabled", False),
+            "failures": mcp_stats.get("failures", 0),
+            "max_payment_usdc": mcp_stats.get("max_payment_usdc", 0.01),
         }

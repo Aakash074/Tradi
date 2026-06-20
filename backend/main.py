@@ -23,9 +23,22 @@ agent_task: Optional[asyncio.Task] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global orchestrator
-    orchestrator = TradiOrchestrator()
+    if orchestrator is not None:
+        logger.info("Tradi backend started (external orchestrator)")
+        yield
+        if orchestrator:
+            orchestrator.stop()
+        logger.info("Tradi backend stopped")
+        return
+
+    settings = get_settings()
+    tournament_path = None
+    if settings.agent_mode == "competition":
+        from tournament_config import DEFAULT_TOURNAMENT_PATH
+        tournament_path = DEFAULT_TOURNAMENT_PATH
+    orchestrator = TradiOrchestrator(tournament_config_path=tournament_path)
     await orchestrator.initialize()
-    logger.info("Tradi backend started")
+    logger.info("Tradi backend started (mode=%s)", settings.agent_mode)
     yield
     if orchestrator:
         orchestrator.stop()
@@ -147,32 +160,37 @@ async def initialize_agent():
 async def regime_status():
     if not orchestrator:
         raise HTTPException(503, "Agent not initialized")
-    from strategies.regime_detection import get_regime_strategy_label
-
-    regime = orchestrator.market_state_adapter.current_regime
+    conf = orchestrator.confluence.get_dashboard_data()
     return {
-        "current_regime": regime.value,
-        "active_strategy": get_regime_strategy_label(regime),
-        "regime_display": f"Market State: {regime.value} — Using {get_regime_strategy_label(regime)}",
-        "pending_regime": orchestrator.market_state_adapter.pending_regime.value
-        if orchestrator.market_state_adapter.pending_regime
-        else None,
-        "metrics": orchestrator._regime_metrics,
+        "current_regime": conf["regime_mode"],
+        "regime_mode": conf["regime_mode"],
+        "active_strategy": "Three-Layer Confluence",
+        "regime_display": f"Regime: {conf['regime_mode']} — Funding Flow / Microstructure MR / Kelly Momentum",
+        "metrics": conf["regime_metrics"],
     }
 
 
-@app.get("/api/strategies/whales")
-async def whale_status():
+@app.get("/api/strategies/confluence")
+async def confluence_status():
     if not orchestrator:
         raise HTTPException(503, "Agent not initialized")
-    return orchestrator.whale_shadow.get_whale_stats()
+    return orchestrator.confluence.get_dashboard_data()
 
 
-@app.get("/api/strategies/momentum")
-async def momentum_status():
+@app.get("/api/strategies/ghost")
+async def ghost_status():
     if not orchestrator:
         raise HTTPException(503, "Agent not initialized")
-    return orchestrator.momentum_breakout.get_stats()
+    return orchestrator.confluence.ghost.get_stats()
+
+
+@app.get("/api/strategies/microstructure")
+async def microstructure_heatmap():
+    if not orchestrator:
+        raise HTTPException(503, "Agent not initialized")
+    from agent.confluence_engine import SCAN_TOKENS
+    tokens = [t for t in SCAN_TOKENS if orchestrator.validator.is_eligible(t)]
+    return await orchestrator.cmc.get_microstructure_heatmap(tokens)
 
 
 @app.post("/api/risk/reset")

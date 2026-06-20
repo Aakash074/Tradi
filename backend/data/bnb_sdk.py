@@ -43,12 +43,11 @@ class BNBAIAgentSDK:
             logger.info("Paper mode: Agent registered as %s", self._agent_id)
             return True, self._agent_id
 
-        if not self.settings.bnb_sdk_api_key:
-            return False, "BNB SDK API key not configured"
-
-        # Production: call BNB AI Agent SDK registration endpoint
+        # BNB Agent SDK is open-source (bnbagent); ERC-8004 uses local wallet password,
+        # not a hosted API key. Full SDK wiring is TODO — stub identity for competition init.
         self._agent_id = f"erc8004:tradi:{uuid.uuid4().hex[:16]}"
         self._registered = True
+        logger.info("Competition mode: Agent identity %s", self._agent_id)
         return True, self._agent_id
 
     async def log_trade(self, log: OnChainTradeLog) -> tuple[bool, str]:

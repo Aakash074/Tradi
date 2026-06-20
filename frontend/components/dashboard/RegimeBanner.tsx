@@ -3,6 +3,9 @@
 import { motion } from "framer-motion";
 
 const regimeColors: Record<string, string> = {
+  DEFENSIVE: "border-red-500/40 bg-red-500/10 text-red-400",
+  NORMAL: "border-blue-500/40 bg-blue-500/10 text-blue-400",
+  AGGRESSIVE: "border-green-500/40 bg-green-500/10 text-green-400",
   TRENDING: "border-green-500/40 bg-green-500/10 text-green-400",
   RANGING: "border-blue-500/40 bg-blue-500/10 text-blue-400",
   VOLATILE: "border-amber-500/40 bg-amber-500/10 text-amber-400",
@@ -27,7 +30,7 @@ export default function RegimeBanner({ regime, activeStrategy, regimeDisplay }: 
     >
       <p className="text-lg font-semibold">{display}</p>
       <p className="mt-1 text-sm opacity-80">
-        ADX/ATR regime detection · Strategy auto-selected by market conditions
+        Vol ratio + Fear &amp; Greed · DEFENSIVE / NORMAL / AGGRESSIVE sizing
       </p>
     </motion.div>
   );

@@ -44,13 +44,47 @@ export type DashboardState = {
     total_return_pct: number;
     drawdown_pct: number;
     daily_pnl_pct: number;
+    cash_usd?: number;
+    unrealized_pnl_pct?: number;
+    unrealized_pnl_usd?: number;
+    realized_pnl_usd?: number;
+    wallet_synced?: boolean;
     trades_today: number;
     consecutive_losses: number;
   };
-  regime: string;
+  regime?: string;
+  regime_mode?: string;
   active_strategy?: string;
   regime_display?: string;
   regime_metrics?: Record<string, number>;
+  confluence?: {
+    regime_mode: string;
+    regime_metrics: Record<string, number>;
+    ghost: {
+      ghost_win_rate: number;
+      ghost_cumulative_pnl_pct: number;
+      real_cumulative_pnl_pct: number;
+      ghost_count: number;
+      real_trade_count: number;
+    };
+    russian_doll: {
+      position_size_multiplier: number;
+      max_positions: number;
+      trading_halted: boolean;
+    };
+    strategies: string[];
+  };
+  ghost?: DashboardState["confluence"] extends { ghost: infer G } ? G : never;
+  kelly_gauge?: { optimal_pct: number; regime_multiplier: string };
+  microstructure_heatmap?: Array<{
+    token: string;
+    funding_rate: number;
+    funding_signal: string;
+    flow_signal: string;
+    book_imbalance: number;
+  }>;
+  correlation_matrix?: Array<{ a: string; b: string; corr: number }>;
+  strategies?: Array<{ name: string; weight: string }>;
   risk: {
     is_disqualified: boolean;
     requires_liquidation?: boolean;

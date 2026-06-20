@@ -3,6 +3,9 @@
 import { motion } from "framer-motion";
 
 const regimeColors: Record<string, string> = {
+  DEFENSIVE: "bg-red-500/20 text-red-400 border-red-500/30",
+  NORMAL: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  AGGRESSIVE: "bg-green-500/20 text-green-400 border-green-500/30",
   TRENDING: "bg-green-500/20 text-green-400 border-green-500/30",
   RANGING: "bg-blue-500/20 text-blue-400 border-blue-500/30",
   VOLATILE: "bg-amber-500/20 text-amber-400 border-amber-500/30",
