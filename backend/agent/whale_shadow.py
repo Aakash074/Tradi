@@ -57,7 +57,9 @@ DEFAULT_WHALES = [
 
 
 class WhaleShadow:
-    """Secondary strategy (30% allocation) — shadow smart money on BSC."""
+    """Secondary strategy — shadow smart money on BSC (requires on-chain indexer)."""
+
+    SIMULATED = True  # Paper mode uses random signals; disable in orchestrator until live
 
     ALLOCATION = 0.30
     STRATEGY_NAME = "WHALE"

@@ -56,6 +56,7 @@ export type DashboardState = {
     requires_liquidation?: boolean;
     position_size_multiplier: number;
     risk_layers?: Record<string, number>;
+    reentry_throttle_hours?: number;
     min_reentry_hours?: number;
     active_breakers: Array<{
       type: string;

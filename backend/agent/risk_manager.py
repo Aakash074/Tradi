@@ -1,4 +1,4 @@
-"""Risk management, circuit breakers, anti-churn, and tournament sizing."""
+"""Risk management, circuit breakers, reentry throttle, and dynamic risk budgeting."""
 
 import logging
 from dataclasses import dataclass, field
@@ -17,7 +17,8 @@ RISK_LAYERS = {
     "dq_line": 0.30,      # Game over (competition rule)
 }
 
-MIN_REENTRY_HOURS = 4
+MIN_REENTRY_HOURS = 2  # Reentry throttle cooldown
+REENTRY_THROTTLE_HOURS = MIN_REENTRY_HOURS
 
 
 @dataclass
@@ -39,7 +40,7 @@ class RiskState:
 
 
 class RiskManager:
-    """Enforces circuit breakers, anti-churn, and tournament position sizing."""
+    """Enforces circuit breakers, reentry throttle, and dynamic risk budgeting."""
 
     SOFT_HALT_HOURS = 24
     MEDIUM_HALT_HOURS = 48
@@ -88,16 +89,16 @@ class RiskManager:
         self._last_exit_times[token.upper()] = datetime.now(timezone.utc)
 
     def can_enter_position(self, token: str) -> tuple[bool, str]:
-        """Anti-churn: block re-entry within MIN_REENTRY_HOURS of last exit."""
+        """Reentry throttle: block re-entry within REENTRY_THROTTLE_HOURS of last exit."""
         key = token.upper()
         last_exit = self._last_exit_times.get(key)
         if not last_exit:
             return True, "OK"
         elapsed = datetime.now(timezone.utc) - last_exit
-        if elapsed < timedelta(hours=MIN_REENTRY_HOURS):
-            remaining = timedelta(hours=MIN_REENTRY_HOURS) - elapsed
+        if elapsed < timedelta(hours=REENTRY_THROTTLE_HOURS):
+            remaining = timedelta(hours=REENTRY_THROTTLE_HOURS) - elapsed
             hours_left = remaining.total_seconds() / 3600
-            return False, f"Anti-churn: Must wait {hours_left:.1f}h before re-entering {token}"
+            return False, f"Reentry throttle: must wait {hours_left:.1f}h before re-entering {token}"
         return True, "OK"
 
     def check_portfolio_risk(
@@ -191,9 +192,9 @@ class RiskManager:
             return False, f"Token not eligible: {signal.token}"
 
         if signal.action == "BUY":
-            can_enter, churn_reason = self.can_enter_position(signal.token)
+            can_enter, throttle_reason = self.can_enter_position(signal.token)
             if not can_enter:
-                return False, churn_reason
+                return False, throttle_reason
 
         if trades_today >= self.settings.max_trades_per_day:
             return False, f"Max trades per day ({self.settings.max_trades_per_day}) reached"
@@ -208,8 +209,8 @@ class RiskManager:
 
         return True, "Trade validated"
 
-    def calculate_tournament_position_size(self, confidence: float, drawdown_pct: float) -> float:
-        """Tournament sizing: aggressive when healthy, conservative near DQ line."""
+    def calculate_dynamic_risk_budget_size(self, confidence: float, drawdown_pct: float) -> float:
+        """Dynamic risk budgeting: aggressive when healthy, conservative near DQ line."""
         base = 0.15
         risk_budget = max(0.0, (RISK_LAYERS["dq_line"] - drawdown_pct) / RISK_LAYERS["dq_line"])
 
@@ -230,9 +231,9 @@ class RiskManager:
         drawdown_pct: float,
         atr_ratio: float = 1.0,
     ) -> float:
-        """Legacy wrapper — delegates to tournament sizing when base is default."""
+        """Legacy wrapper — delegates to dynamic risk budgeting when base is default."""
         if base_size_pct >= 0.14:
-            return self.calculate_tournament_position_size(confidence, drawdown_pct)
+            return self.calculate_dynamic_risk_budget_size(confidence, drawdown_pct)
         risk_budget = max(0, (RISK_LAYERS["dq_line"] - drawdown_pct) / RISK_LAYERS["dq_line"])
         volatility_factor = 1 / (1 + atr_ratio)
         size = base_size_pct * confidence * risk_budget * volatility_factor * self.state.position_size_multiplier
@@ -255,7 +256,8 @@ class RiskManager:
             "requires_liquidation": self.state.requires_liquidation,
             "position_size_multiplier": self.state.position_size_multiplier,
             "risk_layers": RISK_LAYERS,
-            "min_reentry_hours": MIN_REENTRY_HOURS,
+            "reentry_throttle_hours": REENTRY_THROTTLE_HOURS,
+            "min_reentry_hours": REENTRY_THROTTLE_HOURS,
             "active_breakers": [
                 {
                     "type": b.breaker_type,

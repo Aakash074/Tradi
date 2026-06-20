@@ -1,4 +1,4 @@
-"""Lock-in ratchet and position management."""
+"""Profit protection scaling and position management."""
 
 import logging
 from datetime import datetime, timezone
@@ -6,20 +6,20 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-RATCHET_LEVELS = [
+PROFIT_PROTECTION_LEVELS = [
     (0.35, 0.05, "+35% gain"),
     (0.20, 0.10, "+20% gain"),
     (0.10, 0.15, "+10% gain"),
 ]
 
 
-def apply_lock_in_ratchet(
+def apply_profit_protection_scaling(
     positions: list[dict],
     portfolio_value: float,
     log_fn: Optional[Callable[..., None]] = None,
 ) -> list[dict]:
     """
-    Trim winning positions to protect gains.
+    Trim winning positions via profit protection scaling.
     Returns list of trim actions taken.
     """
     actions: list[dict] = []
@@ -34,7 +34,7 @@ def apply_lock_in_ratchet(
 
         pnl_pct = (current - entry) / entry
 
-        for threshold, max_exposure_pct, label in RATCHET_LEVELS:
+        for threshold, max_exposure_pct, label in PROFIT_PROTECTION_LEVELS:
             if pnl_pct <= threshold:
                 continue
 
@@ -49,16 +49,16 @@ def apply_lock_in_ratchet(
                 "from_size_usd": size_usd,
                 "to_size_usd": target_size,
                 "trim_usd": trim_amount,
-                "reason": f"Ratchet: Trimmed to {max_exposure_pct*100:.0f}% after {label}",
+                "reason": f"Profit protection: trimmed to {max_exposure_pct*100:.0f}% after {label}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             position["amount_usd"] = target_size
-            position["ratchet_applied"] = label
+            position["profit_protection_applied"] = label
             actions.append(action)
 
             msg = action["reason"]
             if log_fn:
-                log_fn("RATCHET", "TRIM", action["token"], msg)
+                log_fn("PROFIT_PROTECTION", "TRIM", action["token"], msg)
             else:
                 logger.info("%s — %s", action["token"], msg)
             break

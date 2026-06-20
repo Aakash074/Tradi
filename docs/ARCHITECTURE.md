@@ -15,7 +15,7 @@ Data Ingestion → Signal Generation → Risk Validation → TWAK Execution → 
 | Module | Role |
 |--------|------|
 | `agent/orchestrator.py` | Main loop, strategy selection, keepalive trades |
-| `agent/regime_switcher.py` | Strategy 1 — ADX/ATR/Bollinger regime detection |
+| `agent/market_state_adapter.py` | Strategy 1 — ADX/ATR market state adaptation |
 | `agent/whale_shadow.py` | Strategy 2 — Smart money copy trading |
 | `agent/yield_optimizer.py` | Strategy 3 — PancakeSwap LP yield |
 | `agent/risk_manager.py` | Circuit breakers and position limits |

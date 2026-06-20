@@ -19,7 +19,7 @@ export default function RiskPage() {
     active_breakers: [] as Array<{ type: string; reason: string; expires_at: string | null }>,
     max_drawdown_dq: 30,
     risk_layers: {} as Record<string, number>,
-    min_reentry_hours: 4,
+    reentry_throttle_hours: 4,
   });
 
   useEffect(() => {
@@ -33,7 +33,7 @@ export default function RiskPage() {
           active_breakers: riskData.active_breakers,
           max_drawdown_dq: riskData.max_drawdown_dq,
           risk_layers: riskData.risk_layers ?? {},
-          min_reentry_hours: riskData.min_reentry_hours ?? 4,
+          reentry_throttle_hours: riskData.reentry_throttle_hours ?? riskData.min_reentry_hours ?? 4,
         });
       } catch {
         /* backend offline */
@@ -49,7 +49,7 @@ export default function RiskPage() {
   return (
     <div className="p-6 md:p-8">
       <h1 className="mb-2 text-2xl font-bold">Risk Monitor</h1>
-      <p className="mb-8 text-sm text-zinc-500">Multi-layer kill switch, anti-churn, and tournament sizing</p>
+      <p className="mb-8 text-sm text-zinc-500">Multi-layer kill switch, reentry throttle, and dynamic risk budgeting</p>
 
       {risk.requires_liquidation && (
         <div className="mb-6 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-3 text-sm text-red-300">
@@ -106,17 +106,17 @@ export default function RiskPage() {
           <p className="text-sm text-zinc-500">Max single position</p>
         </div>
         <div className="card p-6">
-          <p className="text-2xl font-bold">{risk.min_reentry_hours}h</p>
-          <p className="text-sm text-zinc-500">Anti-churn re-entry cooldown</p>
+          <p className="text-2xl font-bold">{risk.reentry_throttle_hours}h</p>
+          <p className="text-sm text-zinc-500">Reentry throttle cooldown (2h)</p>
         </div>
         <div className="card p-6">
           <p className="text-2xl font-bold">15%</p>
-          <p className="text-sm text-zinc-500">Tournament base size (scales with drawdown)</p>
+          <p className="text-sm text-zinc-500">Dynamic risk budget base (scales with drawdown)</p>
         </div>
       </div>
 
       <div className="mt-6 card p-6">
-        <p className="mb-4 text-sm font-medium text-zinc-400">Lock-In Ratchet</p>
+        <p className="mb-4 text-sm font-medium text-zinc-400">Profit Protection Scaling</p>
         <div className="grid gap-3 md:grid-cols-3 text-sm">
           <div className="rounded-lg border border-zinc-800 p-3">
             <p className="font-medium text-green-400">+10% gain</p>

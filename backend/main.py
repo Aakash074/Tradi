@@ -149,13 +149,13 @@ async def regime_status():
         raise HTTPException(503, "Agent not initialized")
     from strategies.regime_detection import get_regime_strategy_label
 
-    regime = orchestrator.regime_switcher.current_regime
+    regime = orchestrator.market_state_adapter.current_regime
     return {
         "current_regime": regime.value,
         "active_strategy": get_regime_strategy_label(regime),
         "regime_display": f"Market State: {regime.value} — Using {get_regime_strategy_label(regime)}",
-        "pending_regime": orchestrator.regime_switcher.pending_regime.value
-        if orchestrator.regime_switcher.pending_regime
+        "pending_regime": orchestrator.market_state_adapter.pending_regime.value
+        if orchestrator.market_state_adapter.pending_regime
         else None,
         "metrics": orchestrator._regime_metrics,
     }

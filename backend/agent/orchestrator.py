@@ -6,12 +6,12 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from agent.keepalive_strategy import KeepaliveStrategy
 from agent.momentum_breakout import MomentumBreakout
 from agent.portfolio import PortfolioTracker
-from agent.position_manager import apply_lock_in_ratchet
-from agent.regime_switcher import RegimeSwitcher
+from agent.position_manager import apply_profit_protection_scaling
+from agent.market_state_adapter import MarketStateAdapter
 from agent.risk_manager import RiskManager
-from agent.whale_shadow import WhaleShadow
 from config import get_settings
 from data.bnb_sdk import BNBAIAgentSDK
 from data.cmchub_client import CMCHubClient
@@ -20,6 +20,9 @@ from strategies.regime_detection import MarketRegime, get_regime_strategy_label
 from strategies.signal_generation import TradeSignal, select_best_signal
 from validation.token_validator import TokenValidator
 
+# Disabled: whale_shadow uses simulated random signals until BSC on-chain indexer is wired up
+WHALE_SHADOW_ENABLED = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +30,7 @@ class TradiOrchestrator:
     """Coordinates data, strategies, risk, and execution."""
 
     LOOP_INTERVAL_SECONDS = 900  # 15 minutes
-    KEEPALIVE_HOUR_UTC = 20
+    KEEPALIVE_HOUR_UTC = 18
     MAX_HOLD_HOURS = 48
 
     def __init__(self):
@@ -38,9 +41,13 @@ class TradiOrchestrator:
         self.bnb_sdk = BNBAIAgentSDK()
         self.portfolio = PortfolioTracker()
         self.risk = RiskManager()
-        self.regime_switcher = RegimeSwitcher(self.cmc, self.validator)
-        self.whale_shadow = WhaleShadow(self.validator)
+        self.market_state_adapter = MarketStateAdapter(self.cmc, self.validator)
+        self.whale_shadow = None
+        if WHALE_SHADOW_ENABLED:
+            from agent.whale_shadow import WhaleShadow
+            self.whale_shadow = WhaleShadow(self.validator)
         self.momentum_breakout = MomentumBreakout(self.cmc, self.validator)
+        self.keepalive_strategy = KeepaliveStrategy(self.cmc, self.validator)
         self._running = False
         self._open_positions: list[dict] = []
         self._activity_log: list[dict] = []
@@ -80,11 +87,13 @@ class TradiOrchestrator:
 
     async def evaluate_strategies(self) -> list[TradeSignal]:
         # Refresh regime before strategy evaluation
-        await self.regime_switcher.detect_and_update_regime()
-        self._regime_metrics = getattr(self.regime_switcher, "_last_metrics", {})
+        await self.market_state_adapter.detect_and_update_regime()
+        self._regime_metrics = getattr(self.market_state_adapter, "_last_metrics", {})
 
-        regime_signals = await self.regime_switcher.scan_opportunities()
-        whale_signals = await self.whale_shadow.detect_whale_signals()
+        regime_signals = await self.market_state_adapter.scan_opportunities()
+        whale_signals = []
+        if self.whale_shadow:
+            whale_signals = await self.whale_shadow.detect_whale_signals()
         momentum_signals = await self.momentum_breakout.scan_breakouts()
 
         all_signals = regime_signals + whale_signals + momentum_signals
@@ -108,11 +117,11 @@ class TradiOrchestrator:
         return filtered
 
     def _apply_priority_rules(self, signals: list[TradeSignal]) -> list[TradeSignal]:
-        regime = self.regime_switcher.current_regime
+        regime = self.market_state_adapter.current_regime
         boosted = []
         for signal in signals:
             score = signal.opportunity_score
-            if signal.strategy == "REGIME" and regime in (MarketRegime.TRENDING, MarketRegime.VOLATILE):
+            if signal.strategy == "ADAPTER" and regime in (MarketRegime.TRENDING, MarketRegime.VOLATILE):
                 score *= 1.2
             if signal.strategy == "MOMENTUM" and regime == MarketRegime.TRENDING:
                 score *= 1.25
@@ -136,9 +145,9 @@ class TradiOrchestrator:
             except Exception as e:
                 logger.warning("Price update failed for %s: %s", token, e)
 
-    async def _apply_ratchet(self) -> list[dict]:
+    async def _apply_profit_protection(self) -> list[dict]:
         portfolio_value = self.portfolio.state.total_value_usd
-        return apply_lock_in_ratchet(
+        return apply_profit_protection_scaling(
             self._open_positions,
             portfolio_value,
             log_fn=self._log_activity,
@@ -209,8 +218,8 @@ class TradiOrchestrator:
             self._log_activity(signal.strategy, "REJECTED", signal.token, risk_reason)
             return None
 
-        # Tournament position sizing
-        signal.position_size_pct = self.risk.calculate_tournament_position_size(
+        # Dynamic risk budgeting for position size
+        signal.position_size_pct = self.risk.calculate_dynamic_risk_budget_size(
             signal.confidence, drawdown
         )
 
@@ -289,43 +298,29 @@ class TradiOrchestrator:
         return trade_record
 
     async def keepalive_trade(self) -> Optional[dict]:
-        now = datetime.now(timezone.utc)
         portfolio = self.portfolio.to_dict()
-        if portfolio["trades_today"] > 0:
+        signal = await self.keepalive_strategy.generate_signal(portfolio)
+        if not signal:
             return None
-        if now.hour < self.KEEPALIVE_HOUR_UTC:
-            return None
-
-        signal = TradeSignal(
-            strategy="KEEPALIVE",
-            action="BUY",
-            token="USDT",
-            token_to="USDC",
-            confidence=1.0,
-            expected_return=0.0001,
-            risk=0.01,
-            position_size_pct=0.01,
-            reason="Daily minimum trade requirement (keepalive)",
-        )
-        self._log_activity("KEEPALIVE", "BUY", "USDT", "Executing minimum daily trade")
+        self._log_activity("KEEPALIVE", "BUY", signal.token, signal.reason)
         return await self.execute_signal(signal)
 
     async def run_cycle(self) -> dict:
         await self._update_position_prices()
         await self._check_position_exits()
-        ratchet_actions = await self._apply_ratchet()
+        profit_protection_actions = await self._apply_profit_protection()
 
         signals = await self.evaluate_strategies()
         prioritized = self._apply_priority_rules(signals)
         best = select_best_signal(prioritized)
 
-        regime = self.regime_switcher.current_regime
+        regime = self.market_state_adapter.current_regime
         result = {
             "signals_count": len(signals),
             "trade": None,
             "regime": regime.value,
             "active_strategy": get_regime_strategy_label(regime),
-            "ratchet_actions": ratchet_actions,
+            "profit_protection_actions": profit_protection_actions,
         }
 
         if best and best.action != "HOLD":
@@ -356,7 +351,7 @@ class TradiOrchestrator:
 
     def get_dashboard_state(self) -> dict:
         portfolio = self.portfolio.to_dict()
-        regime = self.regime_switcher.current_regime
+        regime = self.market_state_adapter.current_regime
         active_strategy = get_regime_strategy_label(regime)
         return {
             "agent_name": "Tradi",
@@ -370,7 +365,8 @@ class TradiOrchestrator:
             "open_positions": self._open_positions,
             "trade_history": self._trade_history[:50],
             "activity_log": self._activity_log[:50],
-            "whales": self.whale_shadow.get_whale_stats(),
+            "whales": self.whale_shadow.get_whale_stats() if self.whale_shadow else [],
+            "whale_shadow_enabled": WHALE_SHADOW_ENABLED,
             "momentum": self.momentum_breakout.get_stats(),
             "eligible_token_count": self.validator.count,
             "x402_stats": self.cmc.get_x402_stats(),

@@ -61,31 +61,31 @@ def test_consecutive_losses_halts():
     assert not can_trade
 
 
-def test_anti_churn_blocks_reentry():
+def test_reentry_throttle_blocks_reentry():
     rm = RiskManager()
     rm.record_exit("CAKE")
     can_enter, reason = rm.can_enter_position("CAKE")
     assert not can_enter
-    assert "Anti-churn" in reason
+    assert "Reentry throttle" in reason
 
 
-def test_anti_churn_allows_after_cooldown():
+def test_reentry_throttle_allows_after_cooldown():
     rm = RiskManager()
     rm._last_exit_times["CAKE"] = datetime.now(timezone.utc) - timedelta(hours=5)
     can_enter, reason = rm.can_enter_position("CAKE")
     assert can_enter
 
 
-def test_tournament_sizing_healthy():
+def test_dynamic_risk_budgeting_healthy():
     rm = RiskManager()
-    size = rm.calculate_tournament_position_size(confidence=0.8, drawdown_pct=0.05)
+    size = rm.calculate_dynamic_risk_budget_size(confidence=0.8, drawdown_pct=0.05)
     assert 0.08 < size <= 0.15
 
 
-def test_tournament_sizing_conservative_near_edge():
+def test_dynamic_risk_budgeting_conservative_near_edge():
     rm = RiskManager()
-    size_healthy = rm.calculate_tournament_position_size(0.8, 0.05)
-    size_risky = rm.calculate_tournament_position_size(0.8, 0.22)
+    size_healthy = rm.calculate_dynamic_risk_budget_size(0.8, 0.05)
+    size_risky = rm.calculate_dynamic_risk_budget_size(0.8, 0.22)
     assert size_risky < size_healthy
 
 

@@ -48,3 +48,6 @@ htmlcov/
 
 # TypeScript
 *.tsbuildinfo
+
+# Backtest output
+backtest_results.png

@@ -1,4 +1,4 @@
-"""Market regime detection for Tradi Regime Switcher strategy."""
+"""Market regime detection for Tradi Market State Adapter strategy."""
 
 from enum import Enum
 

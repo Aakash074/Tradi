@@ -41,16 +41,16 @@ export default function StrategiesPage() {
 
   const strategies = [
     {
-      name: "Regime Switcher",
+      name: "Market State Adapter",
       allocation: "60%",
-      description: "Adaptive strategy based on TRENDING/RANGING/VOLATILE/ACCUMULATION regimes",
+      description: "Adapts tactics by market state: TRENDING/RANGING/VOLATILE/ACCUMULATION",
       active: true,
     },
     {
       name: "Smart Money Shadow",
-      allocation: "30%",
-      description: "Copy profitable whale trades on eligible BEP-20 tokens only",
-      active: true,
+      allocation: "—",
+      description: "Disabled until BSC on-chain whale indexer is integrated (simulated signals removed)",
+      active: false,
     },
     {
       name: "Momentum Breakout",
@@ -84,7 +84,9 @@ export default function StrategiesPage() {
               </span>
             </div>
             <p className="mt-3 text-sm text-zinc-500">{s.description}</p>
-            <p className="mt-4 text-xs text-green-400">● Active</p>
+            <p className={`mt-4 text-xs ${s.active ? "text-green-400" : "text-zinc-500"}`}>
+              {s.active ? "● Active" : "○ Disabled"}
+            </p>
           </div>
         ))}
       </div>

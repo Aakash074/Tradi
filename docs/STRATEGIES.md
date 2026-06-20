@@ -1,32 +1,28 @@
 # Tradi Strategies
 
-## 1. Regime Switcher (60%)
+## 1. Market State Adapter (60%)
 
-Detects market regime hourly using ADX, ATR, and Bollinger Band width:
+Detects market regime hourly using ADX and ATR:
 
 | Regime | Condition | Strategy |
 |--------|-----------|----------|
-| TRENDING | ADX > 25, ATR > 1.5× avg | Supertrend momentum |
-| RANGING | ADX < 20, BB squeeze | RSI mean reversion |
-| VOLATILE | ATR > 2× avg | Bollinger breakout + volume |
-| ACCUMULATION | Default | DCA near 200 EMA |
+| TRENDING | ADX > 25, ATR > 1.5× avg | Momentum |
+| RANGING | ADX < 20 | Mean reversion |
+| VOLATILE | ATR > 2× avg | Breakout |
+| ACCUMULATION | Default | DCA |
 
-## 2. Smart Money Shadow (30%)
+## 2. Smart Money Shadow (disabled)
 
-Tracks whale wallets with:
-- Win rate > 65%
-- 100+ transactions
-- $50K+ portfolio
-- Active within 30 days
+**Status:** Disabled in orchestrator until BSC on-chain whale indexer is integrated.
 
-Copies eligible token swaps with 30–60s delay, 75%+ confidence threshold.
+Paper mode previously used simulated random signals (`WhaleShadow.SIMULATED = True`), which produced fake copy-trade signals. Re-enable by setting `WHALE_SHADOW_ENABLED = True` in `orchestrator.py` after wiring real wallet monitoring.
 
 ## 3. Momentum Breakout (15%)
 
 Directional momentum on eligible tokens only:
 - Entry: Price breaks above 20-period high with volume > 1.5× average
 - Exit: Trailing stop at 2× ATR or 48h max hold
-- Position: 15% of portfolio (tournament-sized)
+- Position: 15% of portfolio (dynamic risk budget)
 - Stop: 3% hard stop
 
 ## Strategy Selection
@@ -34,6 +30,12 @@ Directional momentum on eligible tokens only:
 Every 15 minutes:
 1. Run all strategies
 2. Reject ineligible tokens (score = 0)
-3. Apply priority boosts (regime in TRENDING/VOLATILE, whale confidence > 85%)
+3. Apply priority boosts (market state in TRENDING/VOLATILE, whale confidence > 85%)
 4. Execute highest `opportunity_score` if above threshold
 5. Keepalive trade at 20:00 UTC if no trades today
+
+## Risk Features
+
+- **Dynamic Risk Budgeting** — Position sizes scale with drawdown and confidence
+- **Profit Protection Scaling** — Trim winners at +10%, +20%, +35% gains
+- **Reentry Throttle** — 4-hour cooldown before re-entering a token after exit

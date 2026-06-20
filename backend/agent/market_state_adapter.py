@@ -1,4 +1,4 @@
-"""Strategy 1: Regime Switcher — adaptive strategy based on market regime."""
+"""Strategy 1: Market State Adapter — adaptive strategy based on market regime."""
 
 import logging
 from typing import Optional
@@ -17,7 +17,13 @@ TOP_MCAP_TOKENS = [
     "DOT", "UNI", "AAVE", "ATOM", "FIL", "INJ", "CAKE", "LTC", "BCH", "TON", "DAI",
 ]
 
-REGIME_PARAMS = {
+SCAN_TOKENS = [
+    "CAKE", "ETH", "DOGE", "SHIB", "LINK", "BNB", "ADA",
+    "AVAX", "DOT", "UNI", "AAVE", "ATOM", "FIL", "INJ",
+    "LTC", "BCH", "TON", "DAI", "USDT", "USDC",
+]
+
+STATE_PARAMS = {
     MarketRegime.TRENDING: {"size": 0.15, "stop": 0.02, "tp": 0.06, "risk": 1.0},
     MarketRegime.RANGING: {"size": 0.10, "stop": 0.015, "tp": 0.045, "risk": 0.8},
     MarketRegime.VOLATILE: {"size": 0.08, "stop": 0.015, "tp": 0.09, "risk": 1.5},
@@ -25,11 +31,11 @@ REGIME_PARAMS = {
 }
 
 
-class RegimeSwitcher:
-    """Primary strategy (60% allocation) — switches tactics by market regime."""
+class MarketStateAdapter:
+    """Primary strategy (60% allocation) — adapts tactics by market state."""
 
     ALLOCATION = 0.60
-    STRATEGY_NAME = "REGIME"
+    STRATEGY_NAME = "ADAPTER"
 
     def __init__(self, cmc: CMCHubClient, validator: TokenValidator):
         self.cmc = cmc
@@ -49,15 +55,15 @@ class RegimeSwitcher:
             if self.pending_regime == regime:
                 self.current_regime = regime
                 self.pending_regime = None
-                logger.info("Regime confirmed: %s metrics=%s", regime.value, metrics)
+                logger.info("Market state confirmed: %s metrics=%s", regime.value, metrics)
             else:
                 self.pending_regime = regime
-                logger.info("Regime change pending: %s -> %s", self.current_regime.value, regime.value)
+                logger.info("Market state change pending: %s -> %s", self.current_regime.value, regime.value)
         return self.current_regime
 
     async def generate_signal(self, symbol: str = "CAKE") -> Optional[TradeSignal]:
         if not self.validator.is_eligible(symbol):
-            logger.warning("Regime signal rejected: %s not eligible", symbol)
+            logger.warning("Market state adapter signal rejected: %s not eligible", symbol)
             return None
 
         regime = await self.detect_and_update_regime(symbol)
@@ -65,7 +71,7 @@ class RegimeSwitcher:
         close = ohlcv["close"]
         high, low = ohlcv["high"], ohlcv["low"]
         volume = ohlcv["volume"]
-        params = REGIME_PARAMS[regime]
+        params = STATE_PARAMS[regime]
 
         if regime == MarketRegime.TRENDING:
             return self._trending_signal(symbol, high, low, close, params)
@@ -84,7 +90,7 @@ class RegimeSwitcher:
         adx_vals = adx(high, low, close)
         if not bullish or not adx_vals:
             return None
-        if bullish[-1] and adx_vals[-1] > 25:
+        if bullish[-1] and adx_vals[-1] > 20:
             return TradeSignal(
                 strategy=self.STRATEGY_NAME,
                 action="BUY",
@@ -93,8 +99,8 @@ class RegimeSwitcher:
                 confidence=0.75,
                 expected_return=params["tp"],
                 risk=params["risk"],
-                position_size_pct=params["size"] * self.ALLOCATION,
-                reason=f"Supertrend bullish in TRENDING regime, ADX={adx_vals[-1]:.1f}",
+                position_size_pct=params["size"],
+                reason=f"Supertrend bullish in TRENDING state, ADX={adx_vals[-1]:.1f}",
                 stop_loss_pct=params["stop"],
                 take_profit_pct=params["tp"],
             )
@@ -102,7 +108,7 @@ class RegimeSwitcher:
 
     def _ranging_signal(self, symbol: str, close: list, params: dict) -> Optional[TradeSignal]:
         rsi_vals = rsi(close)
-        if not rsi_vals or rsi_vals[-1] >= 30:
+        if not rsi_vals or rsi_vals[-1] >= 40:
             return None
         return TradeSignal(
             strategy=self.STRATEGY_NAME,
@@ -112,8 +118,8 @@ class RegimeSwitcher:
             confidence=0.65,
             expected_return=params["tp"],
             risk=params["risk"],
-            position_size_pct=params["size"] * self.ALLOCATION,
-            reason=f"RSI oversold ({rsi_vals[-1]:.1f}) in RANGING regime",
+            position_size_pct=params["size"],
+            reason=f"RSI oversold ({rsi_vals[-1]:.1f}) in RANGING state",
             stop_loss_pct=params["stop"],
             take_profit_pct=params["tp"],
         )
@@ -127,7 +133,7 @@ class RegimeSwitcher:
         if not upper or len(volume) < 20:
             return None
         avg_vol = sum(volume[-20:]) / 20
-        if close[-1] > upper[-1] and volume[-1] > 1.5 * avg_vol:
+        if close[-1] > upper[-1] and volume[-1] > 1.2 * avg_vol:
             return TradeSignal(
                 strategy=self.STRATEGY_NAME,
                 action="BUY",
@@ -136,8 +142,8 @@ class RegimeSwitcher:
                 confidence=0.70,
                 expected_return=params["tp"],
                 risk=params["risk"],
-                position_size_pct=params["size"] * self.ALLOCATION,
-                reason="Bollinger breakout with volume spike in VOLATILE regime",
+                position_size_pct=params["size"],
+                reason="Bollinger breakout with volume spike in VOLATILE state",
                 stop_loss_pct=params["stop"],
                 take_profit_pct=params["tp"],
             )
@@ -161,8 +167,8 @@ class RegimeSwitcher:
                 confidence=0.55,
                 expected_return=0.02,
                 risk=params["risk"],
-                position_size_pct=params["size"] * self.ALLOCATION,
-                reason="DCA near 200 EMA in ACCUMULATION regime",
+                position_size_pct=params["size"],
+                reason="DCA near 200 EMA in ACCUMULATION state",
                 stop_loss_pct=0,
                 take_profit_pct=0,
             )
@@ -170,7 +176,7 @@ class RegimeSwitcher:
 
     async def scan_opportunities(self) -> list[TradeSignal]:
         signals = []
-        tokens_to_scan = ["CAKE", "ETH", "DOGE", "SHIB", "LINK"]
+        tokens_to_scan = SCAN_TOKENS
         for token in tokens_to_scan:
             if not self.validator.is_eligible(token):
                 continue
