@@ -101,9 +101,8 @@ class TradiOrchestrator:
         results["agent_identity"] = {"success": ok, "agent_id": agent_id}
 
         restored = load_checkpoint(self)
-        if not restored:
-            await self._sync_portfolio_from_wallet()
-        else:
+        await self._sync_portfolio_from_wallet(after_checkpoint=restored)
+        if restored:
             await self._update_position_prices()
 
         results["portfolio"] = self.portfolio.to_dict()
@@ -163,21 +162,51 @@ class TradiOrchestrator:
         elif mode == "paper" and prev == "competition":
             logger.info("COMPETITION_AUTO_END — back to paper swaps")
 
-    async def _sync_portfolio_from_wallet(self) -> None:
-        """Seed portfolio from TWAK wallet in competition/live (or dry-run testing)."""
+    async def _sync_portfolio_from_wallet(self, after_checkpoint: bool = False) -> None:
+        """Seed or reconcile portfolio from TWAK wallet (competition/live/dry-run)."""
         mode = self.settings.agent_mode
         if mode == "paper" and not self.settings.competition_dry_run:
             return
 
         balance = await self.twak.get_wallet_balance_usd(self.cmc.get_price)
-        if balance > 0:
-            self.portfolio.seed_from_wallet(balance)
-            logger.info("PORTFOLIO wallet sync: $%.2f", balance)
-        else:
-            logger.warning(
-                "PORTFOLIO wallet sync unavailable — using $%.2f paper seed",
-                self.portfolio.state.initial_value_usd,
+        if balance <= 0:
+            if after_checkpoint:
+                logger.warning(
+                    "PORTFOLIO wallet sync unavailable after checkpoint — keeping saved portfolio ($%.2f)",
+                    self.portfolio.state.total_value_usd,
+                )
+            else:
+                logger.warning(
+                    "PORTFOLIO wallet sync unavailable — using $%.2f paper seed",
+                    self.portfolio.state.initial_value_usd,
+                )
+            return
+
+        if after_checkpoint and self._open_positions:
+            if self.settings.competition_dry_run:
+                logger.info(
+                    "PORTFOLIO wallet sync deferred — dry-run checkpoint has %d paper position(s); on_chain=$%.2f",
+                    len(self._open_positions),
+                    balance,
+                )
+                return
+
+            self.portfolio.mark_to_market(self._open_positions)
+            pos_val = self.portfolio.state.positions_value_usd
+            self.portfolio.state.cash_usd = max(0.0, balance - pos_val)
+            self.portfolio.state.wallet_synced = True
+            self.portfolio.mark_to_market(self._open_positions)
+            logger.info(
+                "PORTFOLIO wallet sync (checkpoint reconcile): on_chain=$%.2f cash=$%.2f positions=$%.2f",
+                balance,
+                self.portfolio.state.cash_usd,
+                pos_val,
             )
+            return
+
+        self.portfolio.seed_from_wallet(balance)
+        suffix = " (post-checkpoint)" if after_checkpoint else ""
+        logger.info("PORTFOLIO wallet sync%s: $%.2f", suffix, balance)
 
     def _log_activity(
         self, strategy: str, action: str, token: str, message: str, eligible: bool = True

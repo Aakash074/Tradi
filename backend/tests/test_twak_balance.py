@@ -7,6 +7,44 @@ import pytest
 from data.twak_wrapper import TWAKWrapper
 
 
+def test_parse_balance_json_bsc():
+    twak = TWAKWrapper()
+    output = """
+    {
+      "chain": "bsc",
+      "symbol": "BNB",
+      "available": "0.0099950868",
+      "totalUsd": 5.88
+    }
+    """
+    assert twak._parse_balance_json(output) == pytest.approx(5.88)
+
+
+def test_parse_balance_json_all_chains():
+    twak = TWAKWrapper()
+    output = """[
+      {"chain": "bsc", "symbol": "BNB", "totalUsd": 5.88, "tokens": []}
+    ]"""
+    assert twak._parse_balance_json(output) == pytest.approx(5.88)
+
+
+def test_fetch_wallet_balance_prefers_bsc(monkeypatch):
+    twak = TWAKWrapper()
+    calls: list[list[str]] = []
+
+    def fake_run(args):
+        calls.append(args)
+        if "bsc" in args:
+            return True, '{"chain":"bsc","totalUsd":5.88}'
+        return False, "fail"
+
+    monkeypatch.setattr(twak, "_run_twak", fake_run)
+    ok, out = twak._fetch_wallet_balance_output()
+    assert ok is True
+    assert "5.88" in out
+    assert "bsc" in calls[0]
+
+
 def test_parse_balance_to_usd_stable_and_priced_tokens():
     twak = TWAKWrapper()
 

@@ -1,6 +1,7 @@
 """Trust Wallet Agent Kit (TWAK) integration wrapper."""
 
 import asyncio
+import json
 import logging
 import re
 import subprocess
@@ -203,6 +204,28 @@ class TWAKWrapper:
 
         return await self.execute_swap(quote.quote_id, slippage=slippage)
 
+    def _wallet_balance_args(self, chain: Optional[str] = None, all_chains: bool = False) -> list[str]:
+        args = ["wallet", "balance", "--json"]
+        if all_chains:
+            args.append("--all")
+        elif chain:
+            args.extend(["--chain", chain])
+        if self.settings.twak_agent_password:
+            args.extend(["--password", self.settings.twak_agent_password])
+        return args
+
+    def _fetch_wallet_balance_output(self) -> tuple[bool, str]:
+        """TWAK balance: prefer ``bsc`` (works); ``smartchain`` often fails for balance."""
+        for args in (
+            self._wallet_balance_args(chain="bsc"),
+            self._wallet_balance_args(chain="smartchain"),
+            self._wallet_balance_args(all_chains=True),
+        ):
+            ok, output = self._run_twak(args)
+            if ok and output.strip():
+                return True, output
+        return False, ""
+
     async def get_wallet_balance_usd(
         self,
         price_fn: Callable[[str], Awaitable[float]],
@@ -211,18 +234,84 @@ class TWAKWrapper:
         if self.settings.agent_mode == "paper" and not self.settings.competition_dry_run:
             return 0.0
 
-        ok, output = self._run_twak(["wallet", "balance", "--chain", "smartchain"])
+        ok, output = self._fetch_wallet_balance_output()
         if not ok:
-            logger.warning("Wallet balance query failed: %s", output)
+            logger.warning("Wallet balance query failed (tried bsc, smartchain, --all)")
             return 0.0
 
         return await self._parse_balance_to_usd(output, price_fn)
+
+    @staticmethod
+    def _parse_balance_json(output: str) -> Optional[float]:
+        """Parse TWAK ``--json`` balance when ``totalUsd`` is present."""
+        text = output.strip()
+        if not text.startswith("{") and not text.startswith("["):
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+        entries = payload if isinstance(payload, list) else [payload]
+        total = 0.0
+        found = False
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("error"):
+                continue
+            usd = entry.get("totalUsd")
+            if usd is not None:
+                total += float(usd)
+                found = True
+        return total if found else None
 
     async def _parse_balance_to_usd(
         self,
         output: str,
         price_fn: Callable[[str], Awaitable[float]],
     ) -> float:
+        json_total = self._parse_balance_json(output)
+        if json_total is not None and json_total > 0:
+            logger.info("Wallet balance parsed (json): $%.2f", json_total)
+            return json_total
+
+        # JSON with totalUsd missing — sum native + tokens from structure
+        text = output.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                payload = json.loads(text)
+                entries = payload if isinstance(payload, list) else [payload]
+                total = 0.0
+                for entry in entries:
+                    if not isinstance(entry, dict) or entry.get("error"):
+                        continue
+                    if entry.get("totalUsd") is not None:
+                        total += float(entry["totalUsd"])
+                        continue
+                    sym = str(entry.get("symbol", "")).upper()
+                    amt = entry.get("total") or entry.get("available")
+                    if sym and amt is not None:
+                        amt_f = float(amt)
+                        if sym in STABLECOINS:
+                            total += amt_f
+                        else:
+                            total += amt_f * await price_fn(sym)
+                    for tok in entry.get("tokens") or []:
+                        if not isinstance(tok, dict):
+                            continue
+                        tsym = str(tok.get("symbol", "")).upper()
+                        tamt = tok.get("balance") or tok.get("amount")
+                        if tsym and tamt is not None:
+                            tamt_f = float(tamt)
+                            if tsym in STABLECOINS:
+                                total += tamt_f
+                            else:
+                                total += tamt_f * await price_fn(tsym)
+                if total > 0:
+                    logger.info("Wallet balance parsed (json+prices): $%.2f", total)
+                    return total
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                logger.debug("JSON balance parse fallback failed: %s", e)
+
         holdings: dict[str, float] = {}
         for line in output.splitlines():
             for match in BALANCE_LINE.finditer(line):
