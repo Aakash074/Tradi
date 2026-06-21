@@ -7,6 +7,28 @@ import pytest
 from data.twak_wrapper import TWAKWrapper
 
 
+def test_parse_balance_json_bsc_with_usdt_token():
+    twak = TWAKWrapper()
+
+    async def price_fn(sym: str) -> float:
+        return 600.0
+
+    output = """
+    {
+      "chain": "bsc",
+      "symbol": "BNB",
+      "available": "0.04",
+      "totalUsd": 23.5,
+      "tokens": [{"symbol": "USDT", "balance": "50"}]
+    }
+    """
+
+    async def run():
+        return await twak._parse_balance_json_usd(output, price_fn)
+
+    assert asyncio.run(run()) == pytest.approx(73.5)
+
+
 def test_parse_balance_json_bsc():
     twak = TWAKWrapper()
     output = """
@@ -17,7 +39,10 @@ def test_parse_balance_json_bsc():
       "totalUsd": 5.88
     }
     """
-    assert twak._parse_balance_json(output) == pytest.approx(5.88)
+    async def price_fn(_sym: str) -> float:
+        return 1.0
+
+    assert asyncio.run(twak._parse_balance_json_usd(output, price_fn)) == pytest.approx(5.88)
 
 
 def test_parse_balance_json_all_chains():
@@ -25,7 +50,11 @@ def test_parse_balance_json_all_chains():
     output = """[
       {"chain": "bsc", "symbol": "BNB", "totalUsd": 5.88, "tokens": []}
     ]"""
-    assert twak._parse_balance_json(output) == pytest.approx(5.88)
+
+    async def price_fn(_sym: str) -> float:
+        return 1.0
+
+    assert asyncio.run(twak._parse_balance_json_usd(output, price_fn)) == pytest.approx(5.88)
 
 
 def test_fetch_wallet_balance_prefers_bsc(monkeypatch):
