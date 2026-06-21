@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from agent.checkpoint import load_checkpoint, save_checkpoint
 from agent.confluence_engine import ConfluenceEngine
 from agent.exit_manager import TRAILING_ACTIVATION_PCT, apply_trailing_stop, set_exit_levels
 from agent.keepalive_strategy import KeepaliveStrategy
@@ -22,6 +23,8 @@ from tournament_config import TournamentConfig, load_tournament_config
 from validation.token_validator import TokenValidator
 
 logger = logging.getLogger(__name__)
+
+MIN_TRADE_USD = 2.0  # Skip entries below this (BSC gas / pool minimums)
 
 
 class TradiOrchestrator:
@@ -49,6 +52,12 @@ class TradiOrchestrator:
         self.bnb_sdk = BNBAIAgentSDK()
         self.portfolio = PortfolioTracker()
         self.risk = RiskManager()
+        self.tournament_config_path = tournament_config_path
+        self.production_config_path = (
+            tournament_config_path
+            if tournament_config_path and "production" in tournament_config_path.name
+            else None
+        )
 
         self.tournament_config: Optional[TournamentConfig] = None
         if tournament_config_path:
@@ -78,6 +87,7 @@ class TradiOrchestrator:
         self._activity_log: list[dict] = []
         self._trade_history: list[dict] = []
         self._last_kelly_size: float = 0.0
+        self._checkpoint_cycle_num: int = 0
 
     async def initialize(self) -> dict:
         results = {}
@@ -89,10 +99,69 @@ class TradiOrchestrator:
         results["competition_registration"] = {"success": ok, "message": msg}
         ok, agent_id = await self.bnb_sdk.register_agent("Tradi")
         results["agent_identity"] = {"success": ok, "agent_id": agent_id}
-        await self._sync_portfolio_from_wallet()
+
+        restored = load_checkpoint(self)
+        if not restored:
+            await self._sync_portfolio_from_wallet()
+        else:
+            await self._update_position_prices()
+
         results["portfolio"] = self.portfolio.to_dict()
+        results["checkpoint_restored"] = restored
         logger.info("Tradi initialized: wallet=%s agent=%s", address, agent_id)
         return results
+
+    def _apply_runtime_config(self, mode: str, config_path: Path) -> None:
+        """Reload tournament YAML and strategy components after a mode switch."""
+        import os
+
+        os.environ["AGENT_MODE"] = mode
+        get_settings.cache_clear()
+        self.settings = get_settings()
+        self.cmc.settings = self.settings
+        self.twak.settings = self.settings
+        self.cmc.mcp.settings = self.settings
+
+        paper = self.settings.agent_mode == "paper" and not self.settings.competition_dry_run
+        if getattr(self.cmc.mcp, "x402", None) is not None:
+            self.cmc.mcp.x402.paper_mode = paper
+
+        self.tournament_config_path = config_path
+        self.tournament_config = load_tournament_config(config_path)
+        portfolio_value = self.portfolio.to_dict().get("total_value_usd") or 10000.0
+        self.confluence = ConfluenceEngine(
+            self.cmc,
+            self.validator,
+            self.tournament_config,
+            account_size=portfolio_value,
+        )
+        self.trade_enforcer = SmartTradeEnforcer(self.tournament_config)
+
+        label = "TOURNAMENT" if "tournament" in config_path.name else "PRODUCTION"
+        logger.info(
+            "MODE_SWITCH %s | agent_mode=%s strategy=%s exits=%s adx=%s sizing=%s",
+            label,
+            mode,
+            self.tournament_config.strategy,
+            self.tournament_config.asymmetric_exits,
+            self.tournament_config.adx_filter,
+            self.tournament_config.sizing,
+        )
+
+    async def apply_agent_mode(self, mode: str, config_path: Path) -> None:
+        """Switch paper ↔ competition at runtime (UTC competition window)."""
+        if mode == self.settings.agent_mode and self.tournament_config_path == config_path:
+            return
+
+        prev = self.settings.agent_mode
+        self._apply_runtime_config(mode, config_path)
+        await self._sync_portfolio_from_wallet()
+
+        if mode == "competition" and prev != "competition":
+            ok, msg = await self.twak.register_competition()
+            logger.info("COMPETITION_AUTO_START registration ok=%s msg=%s", ok, msg)
+        elif mode == "paper" and prev == "competition":
+            logger.info("COMPETITION_AUTO_END — back to paper swaps")
 
     async def _sync_portfolio_from_wallet(self) -> None:
         """Seed portfolio from TWAK wallet in competition/live (or dry-run testing)."""
@@ -371,6 +440,12 @@ class TradiOrchestrator:
             self._log_activity(signal.strategy, "REJECTED", signal.token, "Insufficient cash")
             return None
 
+        if trade_amount < MIN_TRADE_USD:
+            msg = f"Trade ${trade_amount:.2f} below MIN_TRADE_USD ${MIN_TRADE_USD:.0f}"
+            logger.warning("%s token=%s", msg, signal.token)
+            self._log_activity(signal.strategy, "REJECTED", signal.token, msg)
+            return None
+
         from_token, to_token = "USDT", signal.token
 
         vol = await self.cmc.get_24h_volatility(signal.token)
@@ -482,6 +557,9 @@ class TradiOrchestrator:
                 logger.info("DAILY qualification trade executed token=%s", forced.get("token_to"))
 
         self.portfolio.mark_to_market(self._open_positions)
+
+        self._checkpoint_cycle_num += 1
+        save_checkpoint(self, self._checkpoint_cycle_num)
 
         regime = self.confluence.regime_mode
         p = self.portfolio.to_dict()

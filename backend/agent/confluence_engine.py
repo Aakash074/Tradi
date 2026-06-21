@@ -12,8 +12,9 @@ from agent.liquidity_sweep import LiquiditySweepDetector
 from agent.pre_trade_checklist import PreTradeChecklist
 from agent.russian_doll_risk import RussianDollRisk
 from agent.token_selector import TokenSelector
+from data.bsc_gas import get_bsc_gas_gwei
 from data.cmchub_client import CMCHubClient
-from strategies.kelly_sizing import dynamic_sizing
+from strategies.kelly_sizing import ADX_SCALE_REFERENCE, CHOP_ADX_MAX, CHOP_ATR_PCT, adx_scale, dynamic_sizing
 from strategies.microstructure import DEFAULT_ADX_THRESHOLD, momentum_pullback_from_ohlcv
 from strategies.regime_filter import RegimeMode, regime_filter
 from strategies.signal_generation import TradeSignal
@@ -62,6 +63,8 @@ class ConfluenceEngine:
         self.stop_loss_pct = tournament.stop_loss_pct if tournament else STOP_LOSS_PCT
         self.take_profit_pct = tournament.take_profit_pct if tournament else TAKE_PROFIT_PCT
         self.daily_loss_limit = tournament.daily_loss_limit if tournament else 0.10
+        self.min_atr_pct = tournament.min_atr_pct if tournament else 0.0
+        self.max_gas_gwei = tournament.max_gas_gwei if tournament else 0.0
 
         self.token_selector = TokenSelector(
             cmc,
@@ -136,6 +139,34 @@ class ConfluenceEngine:
         current_price: float,
     ) -> tuple[bool, Optional[dict], float]:
         """Complete entry analysis with all filters."""
+        close = ohlcv.get("close", [])
+        high = ohlcv.get("high", close)
+        low = ohlcv.get("low", close)
+        adx_vals = adx(high, low, close, 14) if len(close) >= 15 else []
+        current_adx = adx_vals[-1] if adx_vals else 0.0
+        atr_vals = atr(high, low, close, 14) if len(close) >= 15 else []
+        current_atr = atr_vals[-1] if atr_vals else 0.0
+        ref_close = close[-1] if close else current_price
+
+        if ref_close > 0 and current_atr > 0:
+            atr_pct = current_atr / ref_close
+            if self.min_atr_pct > 0 and atr_pct < self.min_atr_pct:
+                logger.info(
+                    "%s: Rejected — LOW_CONVICTION (atr/close=%.4f min=%.2f)",
+                    token,
+                    atr_pct,
+                    self.min_atr_pct,
+                )
+                return False, None, 0.0
+            if atr_pct < CHOP_ATR_PCT and current_adx < CHOP_ADX_MAX:
+                logger.info(
+                    "%s: Rejected — CHOPPY_RANGE (atr/close=%.4f adx=%.1f)",
+                    token,
+                    atr_pct,
+                    current_adx,
+                )
+                return False, None, 0.0
+
         hist_valid, hist_reason, hist_conf = self.historical.analyze(token, ohlcv_5h)
         if not hist_valid and hist_conf < 0.3:
             logger.info("%s: Rejected - %s", token, hist_reason)
@@ -175,13 +206,51 @@ class ConfluenceEngine:
         elif momentum_ok and hist_conf >= 0.6:
             entry_type = "STANDARD"
             confidence = hist_conf * 0.8
-            adx_vals = adx(ohlcv.get("high", []), ohlcv.get("low", []), ohlcv.get("close", []), 14)
-            adx_now = adx_vals[-1] if adx_vals else 0.0
-            if adx_now < 20:
+            if current_adx < 20:
+                logger.info(
+                    "%s: Rejected — STANDARD path ADX %.1f < 20 (hist_conf=%.2f)",
+                    token,
+                    current_adx,
+                    hist_conf,
+                )
                 return False, None, 0.0
             stop = current_price * (1 - self.stop_loss_pct)
             target = current_price * (1 + self.take_profit_pct)
         else:
+            if is_sweep and sweep_quality <= 0.7:
+                logger.info(
+                    "%s: Rejected — liquidity sweep quality %.2f <= 0.7",
+                    token,
+                    sweep_quality,
+                )
+            elif near_fvg and not momentum_ok:
+                logger.info(
+                    "%s: Rejected — near FVG but momentum_pullback failed (strength=%.2f)",
+                    token,
+                    mom_strength,
+                )
+            elif not momentum_ok:
+                logger.info(
+                    "%s: Rejected — no momentum pullback (strength=%.2f hist_conf=%.2f)",
+                    token,
+                    mom_strength,
+                    hist_conf,
+                )
+            elif hist_conf < 0.6:
+                logger.info(
+                    "%s: Rejected — hist_conf %.2f < 0.6 for STANDARD path",
+                    token,
+                    hist_conf,
+                )
+            else:
+                logger.info(
+                    "%s: Rejected — no entry path (sweep=%s fvg=%s momentum=%s hist=%.2f)",
+                    token,
+                    is_sweep,
+                    near_fvg,
+                    momentum_ok,
+                    hist_conf,
+                )
             return False, None, 0.0
 
         passed, failed_checks, position_size = self.checklist.validate(
@@ -193,8 +262,21 @@ class ConfluenceEngine:
             logger.info("%s: Checklist failed - %s", token, failed_checks)
             return False, None, 0.0
 
-        final_size_pct = min(0.05, (position_size * confidence) / self.account_size)
+        scale = adx_scale(current_adx)
+        scaled_position = position_size * scale
+        if scale < 1.0:
+            logger.info(
+                "%s: ADX scale %.2fx (adx=%.1f ref=%.0f) kelly=$%.2f → $%.2f",
+                token,
+                scale,
+                current_adx,
+                ADX_SCALE_REFERENCE,
+                position_size,
+                scaled_position,
+            )
+        final_size_pct = min(0.05, (scaled_position * confidence) / self.account_size)
         if final_size_pct < 0.005:
+            logger.info("%s: Rejected — position size %.3f%% below 0.5%% minimum", token, final_size_pct * 100)
             return False, None, 0.0
 
         return True, {
@@ -218,36 +300,65 @@ class ConfluenceEngine:
         daily_pnl: float = 0.0,
         size_pct: Optional[float] = None,
         signal_data: Optional[dict] = None,
+        current_adx: Optional[float] = None,
     ) -> tuple[bool, float, str]:
         fng = self.regime_metrics.get("fear_greed", 50)
         if fng < 20:
+            logger.info("%s: Rejected — extreme fear (F&G=%s)", token, fng)
             return False, 0.0, "EXTREME_FEAR"
 
         if self.regime_mode == RegimeMode.DEFENSIVE:
+            logger.info("%s: Rejected — DEFENSIVE regime", token)
             return False, 0.0, "DEFENSIVE regime — hold cash"
 
         if daily_pnl <= -self.daily_loss_limit:
+            logger.info("%s: Rejected — daily loss limit", token)
             return False, 0.0, f"Daily loss limit {self.daily_loss_limit * 100:.0f}% hit"
 
         if not self.russian_doll.check_drawdown(drawdown):
+            logger.info("%s: Rejected — %s", token, self.russian_doll.state.halt_reason)
             return False, 0.0, self.russian_doll.state.halt_reason
 
         corr_ok, corr_reason = correlation_filter_fast(token, open_positions)
         if not corr_ok:
+            logger.info("%s: Rejected — correlation (%s)", token, corr_reason)
             return False, 0.0, corr_reason
 
         if not self.evaluate_signal(strength):
+            logger.info(
+                "%s: Rejected — strength %.2f <= %.2f",
+                token,
+                strength,
+                MIN_SIGNAL_STRENGTH,
+            )
             return False, 0.0, f"Strength {strength:.2f} <= {MIN_SIGNAL_STRENGTH}"
+
+        if self.max_gas_gwei > 0:
+            gas_gwei = await get_bsc_gas_gwei()
+            if gas_gwei is not None and gas_gwei > self.max_gas_gwei:
+                logger.info(
+                    "%s: Rejected — HIGH_GAS (%.1f gwei > %.0f gwei, strategy only)",
+                    token,
+                    gas_gwei,
+                    self.max_gas_gwei,
+                )
+                return False, 0.0, "HIGH_GAS"
 
         if size_pct is not None:
             size = size_pct * self.russian_doll.state.position_size_multiplier
         else:
             size = dynamic_sizing(
-                atr_pct, strength, self.regime_mode, drawdown, sizing_mode=self.sizing_mode
+                atr_pct,
+                strength,
+                self.regime_mode,
+                drawdown,
+                sizing_mode=self.sizing_mode,
+                current_adx=current_adx,
             )
             size *= self.russian_doll.state.position_size_multiplier
 
         if size < 0.005:
+            logger.info("%s: Rejected — sized below 0.5%% minimum", token)
             return False, 0.0, "Size below 0.5% minimum"
 
         # After signal generated, before execution:
@@ -296,6 +407,8 @@ class ConfluenceEngine:
         strength = max(confidence, entry_data.get("mom_strength", 0.0), MIN_SIGNAL_STRENGTH)
         atr_vals = atr(ohlcv.get("high", []), ohlcv.get("low", []), close, 14)
         atr_pct = (atr_vals[-1] / close[-1]) if atr_vals and close else 0.02
+        adx_vals = adx(ohlcv.get("high", []), ohlcv.get("low", []), close, 14)
+        current_adx = adx_vals[-1] if adx_vals else 0.0
 
         can_enter, size, msg = await self.should_enter(
             token,
@@ -306,8 +419,11 @@ class ConfluenceEngine:
             daily_pnl,
             size_pct=entry_data.get("size_pct"),
             signal_data=entry_data,
+            current_adx=current_adx,
         )
         if not can_enter:
+            if msg != "ADVISORY_BLOCK":
+                logger.info("%s: Rejected — should_enter (%s)", token, msg)
             if msg == "ADVISORY_BLOCK":
                 self._advisory_blocks.insert(
                     0,

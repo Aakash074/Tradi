@@ -4,11 +4,12 @@
 
 **Strategy:** V3 Momentum Pullback Confluence — ADX-filtered pullbacks with liquidity sweep / FVG overlays, asymmetric exits, and Russian Doll risk.
 
-**Backtest (2y):** +26.44% return, Sharpe 1.83, 6.75% max drawdown (`results/tradi_backtest_v3.png`).
+**Backtest (2y, synthetic sim):** +26.44% return, Sharpe 1.83, 6.75% max drawdown on **tournament-style params** (`1.5:6.0` exits, aggressive sizing, ADX 20) — see `results/tradi_backtest_v3.png`. **Live competition performance varies;** the backtest engine uses **synthetic OHLCV**, not historical Binance/CMC replay. Production paper config (`production.yaml`) backtests lower (~+18%) on the same simulator.
 
 ## Features
 
 - **V3 confluence engine** — Regime filter + momentum pullback + sweep/FVG/checklist gates
+- **Entry guards** — Min ATR 2% (tournament), ADX Kelly scaler, choppy-range filter, BSC gas defer (strategy only)
 - **Asymmetric exits** — 1.5% stop / 4.5% target (production), 1.5% / 6% (tournament)
 - **Competition compliance** — 149-token whitelist, 25% max position, daily enforcer at 20:00 UTC
 - **Hard risk gates** — Russian Doll drawdown tiers, daily loss limit, correlation guard
@@ -43,14 +44,24 @@ Open [http://localhost:3000](http://localhost:3000) — API at [http://localhost
 ```bash
 python -m tradi.agent --help
 
-# Paper (production config)
-python -m tradi.agent --mode paper --config config/production.yaml --live-cmc --duration 48h
+# Paper (production config) — auto-flips to competition at COMPETITION_START (UTC)
+python -m tradi.agent --mode paper --config config/production.yaml --live-cmc --duration 168h
 
-# Competition week
+# Competition week (manual; or rely on COMPETITION_AUTO_SWITCH=true)
 python -m tradi.agent --mode competition --config config/tournament_week.yaml --live-cmc --duration 168h
 
-# Without integrated API
-python -m tradi.agent --no-serve-api --mode paper --config config/production.yaml
+# Competition dry-run (paper swaps + real wallet sync, no gas)
+python -m tradi.agent --mode competition --config config/tournament_week.yaml --live-cmc --dry-run --duration 10h
+
+# Dry-run — survives terminal close (recommended before Jun 22)
+nohup backend/.venv/bin/python -u -m tradi.agent \
+  --mode competition --config config/tournament_week.yaml --live-cmc --dry-run --duration 168h \
+  >> logs/dry_run.log 2>&1 &
+
+# Production paper — survives terminal close
+nohup backend/.venv/bin/python -u -m tradi.agent \
+  --mode paper --config config/production.yaml --live-cmc --duration 168h \
+  >> logs/full_system.log 2>&1 &
 ```
 
 | Flag | Default | Description |
@@ -69,9 +80,11 @@ Copy `.env.example` to `.env`:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TWAK_AGENT_PASSWORD` | Competition | Password from `twak wallet create` |
-| `CMC_API_KEY` | Recommended | Live market data (`--live-cmc`) |
+| `CMC_API_KEY` | Recommended | Live prices (`--live-cmc`); OHLCV uses Binance klines fallback on Basic plan |
 | `TWAK_ACCESS_ID` / `TWAK_HMAC_SECRET` | Optional | TWAK hosted API credentials |
 | `AGENT_MODE` | — | `paper` (default) or `competition` |
+| `COMPETITION_START` / `COMPETITION_END` | — | UTC window for auto-switch (ISO-8601, `Z` suffix) |
+| `COMPETITION_AUTO_SWITCH` | `true` | Flip paper → competition at start, back at end (no restart) |
 | `COMPETITION_DRY_RUN` | — | Paper swaps + real wallet sync (`--dry-run`) |
 | `X402_ENABLED` | — | USDC micropayments for CMC premium MCP (`--x402`) |
 | `ADVISORY_GATE_*` | — | Optional veto-only trade review (fail-open) |
@@ -96,27 +109,51 @@ bash scripts/competition_preflight.sh
 
 ## Backtest
 
+Simulated 2-year runs (`scripts/backtest.py`) use **synthetic candles** — useful for config comparison, not live PnL guarantees.
+
 ```bash
+# Tournament week params (closest to +26.44% headline)
 python scripts/backtest.py \
   --strategy momentum_pullback_v3 \
-  --asymmetric_exits 1.5:4.5 \
-  --adx_filter 25 \
-  --sizing dynamic \
-  --start 2024-01-01 \
-  --end 2026-01-01
+  --asymmetric_exits 1.5:6.0 --adx_filter 20 --sizing aggressive \
+  --start 2024-01-01 --end 2026-01-01 \
+  --output results/tradi_backtest_tournament.yaml.json
+
+# Production paper params
+python scripts/backtest.py \
+  --strategy momentum_pullback_v3 \
+  --asymmetric_exits 1.5:4.5 --adx_filter 20 --sizing dynamic \
+  --start 2024-01-01 --end 2026-01-01 \
+  --output results/tradi_backtest_production.yaml.json
 
 python scripts/plot_backtest.py --also-backend
 # → results/tradi_backtest_v3.png
 ```
 
+## Submission notes (risk awareness)
+
+| Guard | Location | Behavior |
+|-------|----------|----------|
+| **Min ATR** | `entry_signal()`, `tournament_week.yaml` | Rejects flat coins when `ATR/close < 2%` (`LOW_CONVICTION`) — tournament only |
+| **Gas defer** | `should_enter()`, `data/bsc_gas.py` | Defers strategy entries when BSC gas > 8 gwei (`HIGH_GAS`); qualification bypasses |
+| **ADX Kelly scaler** | `strategies/kelly_sizing.py`, `entry_signal()` | `adx_scale = min(ADX/25, 1.0)` — 0.8× size at ADX 20, full size at 25+; 0.5% minimum blocks uneconomic trades |
+| **Chop filter** | `entry_signal()` | Rejects when `ATR/close < 1.5%` and `ADX < 25` (`CHOPPY_RANGE`) |
+| **Min trade USD** | `orchestrator.py` | Skips on-chain entries below `$2` (`MIN_TRADE_USD`) — micro-wallet protection |
+| **Russian Doll** | `russian_doll_risk.py` | Size tiers at 8% / 12% DD; halt at 20% (tournament) or 25% (production) |
+| **Daily enforcer** | `trade_enforcer.py` | Qualification trade after 20:00 UTC if no trades that day (5% size, bypasses gas gate) |
+| **Checkpoint** | `agent/checkpoint.py` | Resumes open positions and `trades_today` after restart (`data/agent_checkpoint.json`) |
+
 ## Monitoring
 
+Agent state is checkpointed after each cycle to `data/agent_checkpoint.json` (open positions, `trades_today`, portfolio). On restart with the same `--mode` and `--config`, the session resumes automatically.
+
 ```bash
+tail -f logs/dry_run.log | grep -E "CYCLE|TRADE|EXIT|HALT|HIGH_GAS|LOW_CONVICTION|CHECKPOINT"
 tail -f logs/full_system.log | grep -E "CYCLE|TRADE|EXIT|HALT|DRAWDOWN|DAILY"
 python scripts/monitor.py --watch
 ```
 
-Structured log tags: `TRADE_EXECUTED`, `EXIT_EXECUTED`, `EXIT_DEFERRED`, `SELL_FAILED`, `HALT`, `DRAWDOWN`, `DAILY`, `ERROR`.
+Structured log tags: `TRADE_EXECUTED`, `EXIT_EXECUTED`, `EXIT_DEFERRED`, `SELL_FAILED`, `HALT`, `DRAWDOWN`, `DAILY`, `HIGH_GAS`, `LOW_CONVICTION`, `ERROR`.
 
 ## On-chain execution (Track 1)
 
@@ -148,8 +185,10 @@ Tradi/
 ├── backend/agent/
 │   ├── confluence_engine.py  # V3 brain
 │   ├── orchestrator.py       # Main loop
+│   ├── checkpoint.py         # Session resume on restart
 │   ├── exit_manager.py       # 1.5% / 4.5% exits
 │   └── ...
+├── backend/data/bsc_gas.py   # BSC gas price (strategy deferral)
 ├── frontend/                 # Next.js dashboard
 ├── scripts/
 │   ├── backtest.py

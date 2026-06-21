@@ -37,16 +37,34 @@ bash scripts/competition_preflight.sh
 
 ```
 Token scan → regime_filter (DEFENSIVE = skip)
-  → confluence_engine (momentum / sweep / FVG)
+  → confluence_engine entry_signal (min ATR 2% → LOW_CONVICTION, then CHOPPY_RANGE chop filter)
+  → momentum / sweep / FVG paths
   → pre_trade_checklist (R:R, spread, volume)
+  → should_enter (BSC gas > 8 gwei → HIGH_GAS, strategy only)
+  → ADX Kelly scaler on position size
   → correlation_guard
   → russian_doll_risk
   → token_validator.is_eligible()
   → risk_manager.validate_trade()
+  → MIN_TRADE_USD ($2) check
   → TWAK execute (USDT → token)
   → ... on exit ...
   → TWAK execute (token → USDT)
+  → checkpoint save (data/agent_checkpoint.json)
 ```
+
+## Submission — risk guards (DoraHacks / judges)
+
+| Guard | Purpose |
+|-------|---------|
+| **Min ATR 2%** | Skips flat/low-vol tokens before signal paths (`LOW_CONVICTION`) — tournament config |
+| **Gas defer (8 gwei)** | Defers discretionary entries when BSC gas is high; qualification trades bypass |
+| **ADX Kelly scaler** | Smaller positions in weak trends (ADX &lt; 25); avoids over-betting chop |
+| **Chop filter** | Skips tight ranges (`ATR/close &lt; 1.5%` + ADX &lt; 25) before other gates |
+| **Russian Doll** | Progressive de-risk 8% / 12%; hard halt 20% (tournament) |
+| **0.5% min pct / $2 min USD** | Confluence rejects tiny % sizes; `MIN_TRADE_USD=2` blocks on-chain entries below $2 |
+| **149-token whitelist** | Competition compliance on every leg |
+| **Session checkpoint** | Resumes positions and daily trade count after laptop restart |
 
 Both swap legs run through TWAK with slippage protection. Failed exit swaps defer to the next cycle.
 
@@ -59,6 +77,9 @@ Rejected trades logged in activity feed with reason.
 - [ ] Wallet funded (BNB gas + USDT)
 - [ ] `CMC_API_KEY` set for live data
 - [ ] Paper run shows `CYCLE` logs every 15 min
+- [ ] Competition dry-run: `--mode competition --dry-run --live-cmc --duration 10h` → `logs/dry_run.log`
+- [ ] Dry-run logs show guards working (`LOW_CONVICTION`, `HIGH_GAS` when applicable)
+- [ ] Checkpoint resume: restart same command → `CHECKPOINT restored` in log
 - [ ] Non-eligible tokens blocked (`POST /api/validate-token`)
 - [ ] Dashboard at :3000 shows agent state
 - [ ] Wallet password backed up securely
@@ -66,11 +87,20 @@ Rejected trades logged in activity feed with reason.
 ## Competition Start
 
 ```bash
+# Option A: dedicated competition process
 export AGENT_MODE=competition
-python -m tradi.agent \
+nohup backend/.venv/bin/python -u -m tradi.agent \
   --mode competition \
   --config config/tournament_week.yaml \
   --live-cmc \
   --duration 168h \
   >> logs/competition.log 2>&1 &
+
+# Option B: paper agent with COMPETITION_AUTO_SWITCH=true (flips at COMPETITION_START UTC)
+nohup backend/.venv/bin/python -u -m tradi.agent \
+  --mode paper \
+  --config config/production.yaml \
+  --live-cmc \
+  --duration 168h \
+  >> logs/full_system.log 2>&1 &
 ```

@@ -4,26 +4,46 @@ Single-strategy agent with layered entry filters. Legacy three-strategy blend (M
 
 ## Backtest (2024-01-01 → 2026-01-01)
 
-| Metric | Result | Target |
-|--------|--------|--------|
-| Total return | +26.44% | — |
-| Sharpe | 1.83 | > 1.8 ✓ |
-| Max drawdown | 6.75% | < 15% ✓ |
-| Win rate | 45.5% | > 48% |
-| Profit factor | 1.16 | > 1.6 |
-| Expectancy / trade | 0.203% | > 0.15% ✓ |
-| Trades | 2,840 | — |
+> **Disclaimer:** Backtests use **synthetic OHLCV** (seeded simulation), not historical market replay. **Live competition PnL varies** with slippage, gas, and regime. The +26.44% headline aligns with **tournament** params below; production config simulates ~+18% on the same engine.
 
-Config: `1.5:4.5` exits, ADX ≥ 25, dynamic sizing, 149 eligible tokens.
+### Tournament week (`tournament_week.yaml`) — competition config
+
+| Metric | Result (synthetic sim) | Target |
+|--------|------------------------|--------|
+| Total return | +26.94% | — |
+| Sharpe | 1.89 | > 1.8 ✓ |
+| Max drawdown | 2.99% | < 15% ✓ |
+| Win rate | 40.3% | > 48% |
+| Profit factor | 1.17 | > 1.6 |
+| Expectancy / trade | 0.231% | > 0.15% ✓ |
+
+Config: `1.5:6.0` exits, ADX 20, **aggressive** sizing, **min ATR 2%**, **max gas 8 gwei** (strategy defer), 20% halt.
 
 ```bash
 python scripts/backtest.py --strategy momentum_pullback_v3 \
-  --asymmetric_exits 1.5:4.5 --adx_filter 25 --sizing dynamic \
-  --start 2024-01-01 --end 2026-01-01
+  --asymmetric_exits 1.5:6.0 --adx_filter 20 --sizing aggressive \
+  --start 2024-01-01 --end 2026-01-01 \
+  --output results/tradi_backtest_tournament.yaml.json
+```
+
+### Production paper (`production.yaml`)
+
+| Metric | Result (synthetic sim) |
+|--------|------------------------|
+| Total return | +18.28% |
+| Sharpe | 1.29 |
+
+Config: `1.5:4.5` exits, ADX 20, dynamic sizing, 25% halt.
+
+```bash
+python scripts/backtest.py --strategy momentum_pullback_v3 \
+  --asymmetric_exits 1.5:4.5 --adx_filter 20 --sizing dynamic \
+  --start 2024-01-01 --end 2026-01-01 \
+  --output results/tradi_backtest_production.yaml.json
 python scripts/plot_backtest.py --also-backend
 ```
 
-Chart: `results/tradi_backtest_v3.png`
+Chart (legacy baseline run): `results/tradi_backtest_v3.png` (+26.44%, Sharpe 1.83 — archived `results/tradi_backtest.json`, ADX 25 / 1.5:4.5 dynamic).
 
 ---
 
@@ -35,16 +55,20 @@ Chart: `results/tradi_backtest_v3.png`
 | NORMAL | Default | Trade normally |
 | AGGRESSIVE | Low vol + greed | Trade normally (larger dynamic sizes) |
 
+Fear & Greed source chain: CMC MCP → Pro API → **alternative.me** → mock fallback.
+
 ---
 
 ## Layer 2: Core Signal (`strategies/microstructure.py`)
 
 **Momentum pullback V3** — buy pullbacks in uptrends:
 
-1. **Trend** — Price > EMA20 and ADX > threshold (20 production / 25 backtest)
+1. **Trend** — Price > EMA20 and ADX > threshold (20 in both YAML configs)
 2. **Pullback** — RSI between 30 and 50
 3. **Volume** — Current bar > 1.2× 20-bar average
-4. **Chop filter** — Reject if ADX < 20
+4. **Min ATR** (`entry_signal`, tournament) — Reject `LOW_CONVICTION` when `ATR/close < 2%` (blocks flat coins)
+5. **Chop filter** (`entry_signal`) — Reject `CHOPPY_RANGE` when `ATR/close < 1.5%` and `ADX < 25`
+6. **Standard path** — Reject if ADX < 20 on momentum-only entries
 
 Signal strength ≥ 0.6 required. Up to **4 signals per cycle**.
 
@@ -89,7 +113,23 @@ When `universe: top_20_momentum` in config:
 | `dynamic` | Vol-adjusted, ~4% base, max 5%, scaled by regime and drawdown |
 | `aggressive` | 4% base, max 5%, tournament week |
 
+**ADX Kelly scaler:** `adx_scale = min(ADX / 25, 1.0)` applied to checklist Kelly size and `dynamic_sizing()` — 0.8× at ADX 20, full size at ADX 25+. Positions below **0.5%** of account are rejected (uneconomic vs fees).
+
 Russian Doll multiplier reduces size at 8% / 12% drawdown tiers.
+
+**Min trade size:** Positions below **0.5%** of account are rejected in confluence; `orchestrator.py` also blocks entries below **$2 USD** (`MIN_TRADE_USD`) for BSC gas economics.
+
+---
+
+## Gas defer (`data/bsc_gas.py` + `should_enter()`)
+
+Tournament config sets `execution.max_gas_gwei: 8` (~$0.50–$0.80/swap on BSC).
+
+| Path | Gas check |
+|------|-----------|
+| **Strategy entries** | `should_enter()` fetches BSC `eth_gasPrice` (90s cache); rejects with `HIGH_GAS` if > 8 gwei |
+| **Qualification trades** | Bypass `should_enter()` — enforcer calls `execute_signal()` directly |
+| **RPC failure** | Fail-open (no defer) so transient RPC issues do not block entries |
 
 ---
 
@@ -145,7 +185,15 @@ Daily loss limit: **5%** (config). Competition DQ at **30%** drawdown.
 After **20:00 UTC**, if `trades_today == 0`:
 
 1. Force strongest signal from scan, or
-2. Qualification trade on lowest-ATR eligible token at **0.5%**
+2. Qualification trade on lowest-ATR eligible token at **5%** (`forced_size: 0.05` in tournament config — ~$2.50 on a $50 wallet)
+
+Qualification trades **bypass** the gas defer gate (required for daily compliance).
+
+---
+
+## Session checkpoint (`agent/checkpoint.py`)
+
+After each cycle, agent state is saved to `data/agent_checkpoint.json` (open positions, portfolio, `trades_today`, enforcer flags). Restart with the same `--mode` and `--config` to resume without losing session context.
 
 ---
 
@@ -154,6 +202,8 @@ After **20:00 UTC**, if `trades_today == 0`:
 | File | Use |
 |------|-----|
 | `config/production.yaml` | Paper / production: 1.5:4.5, ADX 20, dynamic sizing, 25% halt |
-| `config/tournament_week.yaml` | Competition: 1.5:6.0, ADX 20, aggressive sizing, 20% halt |
+| `config/tournament_week.yaml` | Competition: 1.5:6.0, ADX 20, aggressive sizing, min ATR 2%, max gas 8 gwei, 20% halt, 5% enforcer |
 
 Loaded via `backend/tournament_config.py` → `TournamentConfig`.
+
+**Competition auto-switch:** With `COMPETITION_AUTO_SWITCH=true`, a paper agent flips to `tournament_week.yaml` at `COMPETITION_START` (UTC) and back at `COMPETITION_END` without restart.

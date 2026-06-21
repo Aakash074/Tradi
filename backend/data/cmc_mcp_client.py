@@ -22,6 +22,7 @@ FNG_CLASSIFICATIONS = (
 )
 
 PRO_API_BASE = "https://pro-api.coinmarketcap.com/v1"
+ALTERNATIVE_ME_FNG_URL = "https://api.alternative.me/fng/"
 
 
 class CMCMCPClient:
@@ -161,6 +162,31 @@ class CMCMCPClient:
                 return int(item)
         return None
 
+    async def _fear_greed_via_alternative_me(self) -> Optional[dict]:
+        """Crypto Fear & Greed Index from alternative.me (free, no API key)."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(ALTERNATIVE_ME_FNG_URL, params={"limit": 1, "format": "json"})
+                resp.raise_for_status()
+                body = resp.json()
+            rows = body.get("data") or []
+            if not rows:
+                return None
+            row = rows[0]
+            raw = row.get("value")
+            value = int(raw) if raw is not None else None
+            if value is None:
+                return None
+            classification = row.get("value_classification") or self._fng_classification(value)
+            return {
+                "value": value,
+                "classification": classification,
+                "source": "alternative.me",
+            }
+        except Exception as e:
+            logger.debug("alternative.me fear/greed failed: %s", e)
+            return None
+
     async def _fear_greed_via_pro_api(self) -> Optional[dict]:
         """Free-tier Pro API fallback for Fear & Greed."""
         try:
@@ -209,6 +235,11 @@ class CMCMCPClient:
         if pro:
             self.cache.set(cache_key, pro, ttl_seconds=900)
             return pro
+
+        alt = await self._fear_greed_via_alternative_me()
+        if alt:
+            self.cache.set(cache_key, alt, ttl_seconds=900)
+            return alt
 
         result = {"value": random.randint(25, 75), "classification": "Neutral", "source": "mock_fallback"}
         self.cache.set(cache_key, result, ttl_seconds=300)

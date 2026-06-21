@@ -7,10 +7,47 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from agent.competition_scheduler import competition_bounds, scheduled_agent_mode
 from agent.orchestrator import TradiOrchestrator
-from tournament_config import TournamentConfig, load_tournament_config
+from config import get_settings
+from tournament_config import DEFAULT_PRODUCTION_PATH, DEFAULT_TOURNAMENT_PATH, load_tournament_config
 
 logger = logging.getLogger(__name__)
+
+
+async def maybe_auto_switch_competition(
+    orch: TradiOrchestrator,
+    cli_mode: str,
+) -> None:
+    """Flip to competition mode at COMPETITION_START (UTC) without restart."""
+    settings = get_settings()
+    if not settings.competition_auto_switch:
+        return
+
+    target = scheduled_agent_mode(settings, cli_mode)
+    if settings.agent_mode == target:
+        return
+
+    start, end = competition_bounds(settings)
+    now = datetime.now(timezone.utc)
+
+    if target == "competition":
+        await orch.apply_agent_mode("competition", DEFAULT_TOURNAMENT_PATH)
+        logger.info(
+            "COMPETITION_AUTO_START utc=%s window=%s → %s",
+            now.isoformat(),
+            start.isoformat(),
+            end.isoformat(),
+        )
+        return
+
+    production_path = orch.production_config_path or DEFAULT_PRODUCTION_PATH
+    await orch.apply_agent_mode("paper", production_path)
+    logger.info(
+        "COMPETITION_AUTO_END utc=%s window_ended=%s",
+        now.isoformat(),
+        end.isoformat(),
+    )
 
 
 async def run_agent_session(
@@ -36,6 +73,7 @@ async def run_agent_session(
             dry_run=dry_run,
         )
         await orch.initialize()
+        await maybe_auto_switch_competition(orch, cli_mode=mode)
 
         label = "PRODUCTION" if "production" in config_path.name else "TOURNAMENT"
         logger.info(
@@ -54,6 +92,12 @@ async def run_agent_session(
 
     while time.monotonic() < deadline and orch._running:
         cycle_num += 1
+        await maybe_auto_switch_competition(orch, cli_mode=mode)
+
+        agent_config = orch.tournament_config
+        if agent_config is None:
+            agent_config = load_tournament_config(config_path)
+
         portfolio = orch.portfolio.to_dict()
         dd = portfolio["drawdown_pct"]
         if dd >= 5:
@@ -121,6 +165,7 @@ async def run_with_api(
     )
     await orch.initialize()
     api_main.orchestrator = orch
+    await maybe_auto_switch_competition(orch, cli_mode=mode)
 
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)

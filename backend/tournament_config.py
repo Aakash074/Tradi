@@ -27,6 +27,8 @@ class TournamentConfig:
     forced_size: float = 0.005
     forced_time: str = "20:00"
     top_n_tokens: int = 20
+    min_atr_pct: float = 0.0
+    max_gas_gwei: float = 0.0  # 0 = disabled; strategy entries deferred above this
 
     stop_loss_pct: float = field(init=False)
     take_profit_pct: float = field(init=False)
@@ -50,8 +52,19 @@ def load_tournament_config(path: Optional[Path] = None) -> TournamentConfig:
 
     risk = raw.get("risk", {})
     enforcer = raw.get("enforcer", {})
+    strategy_block = raw.get("strategy")
+    min_atr_pct = 0.0
+    if isinstance(strategy_block, dict):
+        min_atr_pct = float(strategy_block.get("min_atr_pct", 0))
+    min_atr_pct = float(raw.get("min_atr_pct", min_atr_pct))
+
+    execution = raw.get("execution", {})
+    max_gas_gwei = float(execution.get("max_gas_gwei", raw.get("max_gas_gwei", 0)))
+
     return TournamentConfig(
-        strategy=raw.get("strategy", "momentum_pullback_v3"),
+        strategy=raw.get("strategy", "momentum_pullback_v3")
+        if not isinstance(strategy_block, dict)
+        else strategy_block.get("name", "momentum_pullback_v3"),
         asymmetric_exits=raw.get("asymmetric_exits", "1.5:6.0"),
         adx_filter=float(raw.get("adx_filter", 30)),
         sizing=raw.get("sizing", "aggressive"),
@@ -61,6 +74,8 @@ def load_tournament_config(path: Optional[Path] = None) -> TournamentConfig:
         enforcer_enabled=bool(enforcer.get("enabled", True)),
         forced_size=float(enforcer.get("forced_size", 0.005)),
         forced_time=enforcer.get("forced_time", "20:00"),
+        min_atr_pct=min_atr_pct,
+        max_gas_gwei=max_gas_gwei,
     )
 
 

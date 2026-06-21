@@ -1,13 +1,16 @@
 ---
 strategy: momentum_pullback_v3
+min_atr_pct: 0.02  # 2% minimum ATR/close — blocks flat coins (LOW_CONVICTION)
 asymmetric_exits: "1.5:6.0"  # 4:1 ratio
-adx_filter: 20  # Lowered for testing — catches more trends
+adx_filter: 20  # Tournament ADX threshold
 sizing: aggressive  # 4% base, max 5%
 universe: top_20_momentum  # Filter to top 20 tokens by momentum only
+execution:
+  max_gas_gwei: 8  # Defer strategy entries above ~$0.80/swap; qualification bypasses
 risk:
   halt_drawdown: 0.20  # 20% hard halt
   daily_loss_limit: 0.05  # 5% daily max
 enforcer:
   enabled: true
-  forced_size: 0.005  # 0.5% for qualification trades
+  forced_size: 0.05  # 5% — ~$2.50 on $50 wallet (qualification / daily enforcer)
   forced_time: "20:00"  # UTC

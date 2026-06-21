@@ -16,9 +16,11 @@ Entry point: `python -m tradi.agent` (`tradi/agent/__main__.py`) or `uvicorn mai
 
 | Module | Role |
 |--------|------|
-| `agent/orchestrator.py` | Main loop, position exits, TWAK execution, daily enforcer |
-| `agent/confluence_engine.py` | **V3 brain** — regime, momentum, sweep, FVG, checklist |
+| `agent/orchestrator.py` | Main loop, position exits, TWAK execution, daily enforcer, `MIN_TRADE_USD` |
+| `agent/confluence_engine.py` | **V3 brain** — regime, momentum, sweep, FVG, checklist, gas defer |
+| `agent/checkpoint.py` | Session save/load (`data/agent_checkpoint.json`) |
 | `agent/exit_manager.py` | Asymmetric 1.5:4.5 (prod) / 1.5:6 (tournament) exits + trailing |
+| `agent/competition_scheduler.py` | Auto-switch paper ↔ competition at UTC window |
 | `agent/russian_doll_risk.py` | Drawdown tiers and halt |
 | `agent/token_selector.py` | Top-N momentum universe |
 | `agent/trade_enforcer.py` | Daily qualification trades after 20:00 UTC |
@@ -28,6 +30,7 @@ Entry point: `python -m tradi.agent` (`tradi/agent/__main__.py`) or `uvicorn mai
 | `strategies/kelly_sizing.py` | Dynamic / aggressive position sizing |
 | `data/twak_wrapper.py` | TWAK CLI — wallet, swaps, competition register |
 | `data/cmchub_client.py` | CMC prices/OHLCV (+ mock fallback in paper) |
+| `data/bsc_gas.py` | BSC `eth_gasPrice` for strategy-entry deferral (90s cache) |
 | `data/bnb_sdk.py` | ERC-8004 identity stub + on-chain log buffer |
 | `validation/token_validator.py` | 149 eligible token whitelist |
 | `tournament_config.py` | Loads `production.yaml` / `tournament_week.yaml` |
@@ -42,22 +45,23 @@ Next.js 14 App Router — polls `GET /api/dashboard` for regime, positions, conf
 
 1. **Refresh** regime + top momentum universe (`token_selector`)
 2. **Scan** eligible tokens through `confluence_engine.scan_all()`
-   - Historical context → sweep / FVG / momentum paths
+   - Min ATR filter (tournament) → historical context → sweep / FVG / momentum paths
    - Pre-trade checklist (R:R, spread, volume)
-3. **Filter** by Russian Doll risk, correlation, min strength 0.6
-4. **Execute** up to 4 new positions via TWAK (paper sim or live)
+3. **Filter** by `should_enter()` (gas defer, Russian Doll, correlation, min strength 0.6)
+4. **Execute** up to 4 new positions via TWAK (paper sim or live); skip if trade &lt; $2 USD
 5. **Manage** open positions — stop, take-profit, trailing, 48h max hold
-6. **Enforce** daily trade if after 20:00 UTC and zero trades today
-7. **Expose** state via `/api/dashboard`
+6. **Enforce** daily trade if after 20:00 UTC and zero trades today (qualification bypasses gas)
+7. **Checkpoint** portfolio + positions to `data/agent_checkpoint.json`
+8. **Expose** state via `/api/dashboard`
 
 ## Config
 
-| File | Mode | Exits | Halt |
-|------|------|-------|------|
-| `config/production.yaml` | Paper / dev | 1.5:4.5 | 25% |
-| `config/tournament_week.yaml` | Competition | 1.5:6.0 | 20% |
+| File | Mode | Exits | Halt | Extra |
+|------|------|-------|------|-------|
+| `config/production.yaml` | Paper / dev | 1.5:4.5 | 25% | Dynamic sizing |
+| `config/tournament_week.yaml` | Competition | 1.5:6.0 | 20% | Aggressive sizing, min ATR 2%, max gas 8 gwei |
 
-`AGENT_MODE=competition` auto-loads tournament config when using standalone `uvicorn main:app`.
+`AGENT_MODE=competition` or `COMPETITION_AUTO_SWITCH=true` loads tournament config for the competition window (UTC).
 
 ## Deployment
 
@@ -73,8 +77,8 @@ cd frontend && npm run dev
 bash scripts/competition_preflight.sh
 ```
 
-- Database: SQLite default (`sqlite+aiosqlite:///./tradi.db`) — models scaffolded, agent state primarily in-memory
-- Logs: `logs/full_system.log` or `logs/paper_*.log`
+- Logs: `logs/full_system.log` (paper), `logs/dry_run.log` (competition dry-run), `logs/competition.log` (live)
+- Checkpoint: `data/agent_checkpoint.json` (gitignored; survives restarts)
 
 ## Backtest Pipeline
 

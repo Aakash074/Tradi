@@ -12,6 +12,7 @@ import httpx
 from config import get_settings
 from data.cache import DataCache
 from data.cmc_mcp_client import CMCMCPClient
+from data.ohlcv_provider import fetch_live_ohlcv
 from data.twak_wrapper import TWAKWrapper
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,52 @@ class CMCHubClient:
         )
         self.x402_payments_count = 0
         self.x402_total_cost_usd = 0.0
+        self._ohlcv_source_counts: dict[str, int] = {"cmc": 0, "binance": 0, "mock": 0}
+
+    def _use_live_ohlcv(self) -> bool:
+        """Live candles when --live-cmc or competition/live mode."""
+        return self.live_cmc or self.settings.agent_mode in ("competition", "live")
+
+    async def get_ohlcv(self, symbol: str, interval: str = "1h", limit: int = 100) -> dict[str, list[float]]:
+        cache_key = f"ohlcv:{symbol}:{interval}:{limit}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached
+
+        if not self._use_live_ohlcv():
+            ohlcv = self._generate_mock_ohlcv(symbol, limit)
+            self._ohlcv_source_counts["mock"] += 1
+            self.cache.set(cache_key, ohlcv, ttl_seconds=60)
+            return ohlcv
+
+        live, source = await fetch_live_ohlcv(
+            symbol, interval, limit, cmc_api_key=self.settings.cmc_api_key
+        )
+        if live:
+            self._ohlcv_source_counts[source] = self._ohlcv_source_counts.get(source, 0) + 1
+            ttl = 300 if interval in ("1h", "4h", "1d") else 90
+            self.cache.set(cache_key, live, ttl_seconds=ttl)
+            if self._ohlcv_source_counts.get(source, 0) == 1:
+                logger.info(
+                    "Live OHLCV active for %s — primary source: %s (interval=%s)",
+                    symbol,
+                    source,
+                    interval,
+                )
+            return live
+
+        logger.warning(
+            "Live OHLCV unavailable for %s (%s) — using mock candles",
+            symbol,
+            interval,
+        )
+        ohlcv = self._generate_mock_ohlcv(symbol, limit)
+        self._ohlcv_source_counts["mock"] += 1
+        self.cache.set(cache_key, ohlcv, ttl_seconds=60)
+        return ohlcv
+
+    def get_ohlcv_stats(self) -> dict:
+        return dict(self._ohlcv_source_counts)
 
     async def _request(self, endpoint: str, params: dict) -> dict:
         cache_key = f"cmc:{endpoint}:{':'.join(f'{k}={v}' for k, v in sorted(params.items()))}"
@@ -77,8 +124,10 @@ class CMCHubClient:
 
     def _mock_response(self, endpoint: str, params: dict) -> dict:
         symbol = params.get("symbol", "CAKE")
-        base_price = {"CAKE": 2.45, "ETH": 3500, "DOGE": 0.12, "BNB": 650}.get(
-            symbol.split(",")[0], 1.0
+        if isinstance(symbol, str) and "," in symbol:
+            symbol = symbol.split(",")[0]
+        base_price = {"CAKE": 2.45, "ETH": 3500, "DOGE": 0.12, "BNB": 650, "TON": 5.0}.get(
+            symbol.upper() if isinstance(symbol, str) else "CAKE", 1.0
         )
         noise = random.uniform(-0.02, 0.02)
         price = base_price * (1 + noise)
@@ -90,9 +139,56 @@ class CMCHubClient:
             }
         }
 
+    @staticmethod
+    def _lookup_quote_node(payload: dict, symbol: str) -> Optional[dict]:
+        """Resolve CMC quote node — keys may differ in casing (e.g. TON → Ton)."""
+        data = payload.get("data")
+        if not data or not isinstance(data, dict):
+            return None
+
+        if symbol in data:
+            return data[symbol]
+
+        upper = symbol.upper()
+        for key, node in data.items():
+            if isinstance(key, str) and key.upper() == upper and isinstance(node, dict):
+                return node
+
+        for node in data.values():
+            if not isinstance(node, dict):
+                continue
+            sym = node.get("symbol")
+            if isinstance(sym, str) and sym.upper() == upper:
+                return node
+
+        return None
+
+    @staticmethod
+    def _parse_quote_price(payload: dict, symbol: str) -> Optional[float]:
+        node = CMCHubClient._lookup_quote_node(payload, symbol)
+        if not node:
+            return None
+        try:
+            return float(node["quote"]["USD"]["price"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
     async def get_price(self, symbol: str) -> float:
         data = await self._request("cryptocurrency/quotes/latest", {"symbol": symbol})
-        return float(data["data"][symbol]["quote"]["USD"]["price"])
+        price = self._parse_quote_price(data, symbol)
+        if price is not None:
+            return price
+
+        keys: list[Any] = []
+        if isinstance(data.get("data"), dict):
+            keys = list(data["data"].keys())
+        logger.warning(
+            "CMC quote shape mismatch for %s (data keys=%s) — using fallback price",
+            symbol,
+            keys,
+        )
+        mock = self._mock_response("cryptocurrency/quotes/latest", {"symbol": symbol})
+        return self._parse_quote_price(mock, symbol) or 1.0
 
     async def get_prices(self, symbols: list[str]) -> dict[str, float]:
         result = {}
@@ -102,22 +198,6 @@ class CMCHubClient:
             except Exception as e:
                 logger.warning("Failed to fetch price for %s: %s", sym, e)
         return result
-
-    async def get_ohlcv(self, symbol: str, interval: str = "1h", limit: int = 100) -> dict[str, list[float]]:
-        cache_key = f"ohlcv:{symbol}:{interval}"
-        cached = self.cache.get(cache_key)
-        if cached:
-            return cached
-
-        if self.settings.agent_mode == "paper" or not self.settings.cmc_api_key:
-            ohlcv = self._generate_mock_ohlcv(symbol, limit)
-            self.cache.set(cache_key, ohlcv, ttl_seconds=60)
-            return ohlcv
-
-        # Real API would fetch OHLCV here
-        ohlcv = self._generate_mock_ohlcv(symbol, limit)
-        self.cache.set(cache_key, ohlcv, ttl_seconds=60)
-        return ohlcv
 
     def _generate_mock_ohlcv(self, symbol: str, limit: int) -> dict[str, list[float]]:
         base = {"CAKE": 2.45, "ETH": 3500, "DOGE": 0.12, "BNB": 650}.get(symbol, 1.0)

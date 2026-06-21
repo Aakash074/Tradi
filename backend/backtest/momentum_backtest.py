@@ -234,8 +234,10 @@ def run_momentum_backtest(
                 if not _passes_correlation(token, positions):
                     continue
 
-                if cfg.sizing_mode == "dynamic":
-                    size_pct = dynamic_sizing(atr_p, strength, regime, drawdown)
+                if cfg.sizing_mode in ("dynamic", "aggressive"):
+                    size_pct = dynamic_sizing(
+                        atr_p, strength, regime, drawdown, sizing_mode=cfg.sizing_mode
+                    )
                 else:
                     size_pct = position_size(strength, drawdown)
                 size_pct *= russian.state.position_size_multiplier

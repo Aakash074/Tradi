@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     competition_dry_run: bool = False
     competition_start: str = "2026-06-22T00:00:00Z"
     competition_end: str = "2026-06-28T23:59:59Z"
+    competition_auto_switch: bool = True
 
     # Risk
     max_drawdown_halt: float = 0.25

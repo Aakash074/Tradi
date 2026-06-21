@@ -194,5 +194,7 @@ if [[ $warn -gt 0 ]]; then
 fi
 
 echo "All checks passed. Start competition dry-run:"
-echo "  python -m tradi.agent --mode competition --config config/tournament_week.yaml --live-cmc --duration 2h"
+echo "  nohup backend/.venv/bin/python -u -m tradi.agent \\"
+echo "    --mode competition --config config/tournament_week.yaml \\"
+echo "    --live-cmc --dry-run --duration 10h >> logs/dry_run.log 2>&1 &"
 exit 0

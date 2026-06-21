@@ -43,7 +43,7 @@ def main() -> None:
     parser.add_argument(
         "--sizing",
         default="dynamic",
-        choices=["dynamic", "fixed"],
+        choices=["dynamic", "aggressive", "fixed"],
         help="Position sizing mode",
     )
     args = parser.parse_args()

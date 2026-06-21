@@ -194,3 +194,28 @@ class PortfolioTracker:
             "wallet_synced": self.state.wallet_synced,
             "holdings": self.state.holdings,
         }
+
+    def load_state_dict(self, data: dict) -> None:
+        """Restore portfolio fields from checkpoint (fractions, not dashboard %)."""
+        s = self.state
+        for key in (
+            "total_value_usd",
+            "initial_value_usd",
+            "peak_value_usd",
+            "cash_usd",
+            "positions_value_usd",
+            "day_start_value_usd",
+            "realized_pnl_usd",
+        ):
+            if key in data:
+                setattr(s, key, float(data[key]))
+        if "trades_today" in data:
+            s.trades_today = int(data["trades_today"])
+        if "consecutive_losses" in data:
+            s.consecutive_losses = int(data["consecutive_losses"])
+        if "last_trade_date" in data:
+            s.last_trade_date = data["last_trade_date"]
+        if "wallet_synced" in data:
+            s.wallet_synced = bool(data["wallet_synced"])
+        if "holdings" in data:
+            s.holdings = dict(data["holdings"])

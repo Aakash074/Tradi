@@ -36,6 +36,10 @@ Thumbs.db
 *.log
 logs/
 
+# Agent session checkpoint (local state)
+data/agent_checkpoint.json
+data/agent_checkpoint.json.tmp
+
 # TWAK wallet keys (never commit)
 *.wallet
 wallet/

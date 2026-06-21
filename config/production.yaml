@@ -1,5 +1,5 @@
 ---
-# Tradi V3 production paper config (backtest-validated: Sharpe 1.83, +26.4% over 2y)
+# Tradi V3 production paper config (1.5:4.5 exits, ADX 20, dynamic sizing, 25% halt)
 strategy: momentum_pullback_v3
 asymmetric_exits: "1.5:4.5"  # 1.5% stop, 4.5% target (1:3 R/R)
 adx_filter: 20
